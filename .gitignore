@@ -1,0 +1,29 @@
+# 构建产物：.app 与 .dmg 都由脚本重新生成，不进版本库。
+build/
+dist/
+*.dmg
+*.dmg.sha256
+
+# 依赖与下载缓存。
+runtime/node_modules/
+node_modules/
+.downloads/
+.modulecache/
+.npmcache/
+.tmp/
+
+# 本机私有运行状态：home/ 下有 credentials.yaml 与本地 profile，绝不提交。
+home/
+
+# 上游 deepseek-harness 的独立克隆（自带 .git），不是本仓库的源码。
+deepseek-harness/
+
+# 凭据兜底：即使误放进某个子目录也不提交。
+.env
+.env.*
+*.pem
+*.p12
+credentials.yaml
+
+# macOS。
+.DS_Store

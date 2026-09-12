@@ -1,0 +1,131 @@
+name: Build dmg
+
+# 触发点：
+#   - 打 tag（v0.2.0）→ 构建 + 建 Release 并把 DMG 挂上去
+#   - 在网页上手动 Run workflow → 只出 artifact
+#   - push 到 main / 改到构建相关文件 → 只出 artifact（当作 CI 门禁）
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    paths:
+      - 'shell/**'
+      - 'iconsrc/**'
+      - 'runtime/package.json'
+      - 'runtime/package-lock.json'
+      - '.github/workflows/release-dmg.yml'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本号（只影响文件名与 Info.plist；留空则用 0.1.0-<短 SHA>）'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dmg-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dmg:
+    # macos-15 = 当前 GA 的 arm64 镜像。macos-14 已标记 deprecated；
+    # macos-15-intel / macos-26-intel 才是 Intel，别拿来跑 arm64 产物。
+    runs-on: macos-15
+    timeout-minutes: 45
+    permissions:
+      contents: write # 只有打 tag 那条路径要建 Release，其余步骤用不到
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # 算短 SHA 与 Release notes 需要完整历史
+
+      # 只是为了让 npm ci 有 npm 用；真正打进 .app 的 Node 由 make-app.sh
+      # 自己下载并校验 SHA-256，两者互不影响。
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+
+      - name: 打印工具链版本
+        run: |
+          set -euo pipefail
+          sw_vers
+          uname -m
+          xcodebuild -version
+          swift --version
+          node --version
+          npm --version
+
+      - name: 计算版本号
+        id: version
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            v="${GITHUB_REF_NAME}"
+          elif [[ -n "${INPUT_VERSION}" ]]; then
+            v="${INPUT_VERSION}"
+          else
+            v="0.1.0-$(git rev-parse --short HEAD)"
+          fi
+          v="${v#v}" # v0.2.0 → 0.2.0：Info.plist 里不放前缀
+          echo "version=${v}" >> "$GITHUB_OUTPUT"
+          echo "本次版本号：${v}"
+
+      - name: 安装 dsh 运行时
+        working-directory: runtime
+        run: npm ci --no-audit --no-fund
+
+      - name: 组装 dshX.app
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: bash shell/make-app.sh
+
+      - name: 打包 DMG
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: bash shell/make-dmg.sh
+
+      - name: 写 job 摘要
+        run: |
+          set -euo pipefail
+          {
+            echo "### dshX ${{ steps.version.outputs.version }} (arm64)"
+            echo
+            echo '```'
+            du -h build/*.dmg
+            cat build/*.dmg.sha256
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: dshX-${{ steps.version.outputs.version }}-arm64
+          path: |
+            build/*.dmg
+            build/*.dmg.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: 发布 Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME}"
+          shopt -s nullglob
+          assets=(build/*.dmg build/*.dmg.sha256)
+          if gh release view "$tag" >/dev/null 2>&1; then
+            # tag 被重推过：覆盖同名资产，不动已有的 release 正文。
+            gh release upload "$tag" "${assets[@]}" --clobber
+          else
+            gh release create "$tag" "${assets[@]}" \
+              --verify-tag \
+              --title "dshX ${GITHUB_REF_NAME#v}" \
+              --generate-notes
+          fi
