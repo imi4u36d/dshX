@@ -116,7 +116,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>NSHighResolutionCapable</key>
   <true/>
   <key>NSHumanReadableCopyright</key>
-  <string>本地自建的 DeepSeek Harness 壳（非官方，不可分发）。dsh 后端遵循上游 MIT 许可。</string>
+  <string>本地自建的 DeepSeek Harness 壳（非官方，与 DeepSeek 无隶属关系）；ad-hoc 签名、未经 Apple 公证。dsh 后端遵循上游 MIT 许可。</string>
   <!-- 后端只在 127.0.0.1 上以 http/ws 提供，必须放行非加密的回环流量。
        WKWebView 的网页内容读的是 NSAllowsArbitraryLoadsInWebContent，
        只有 NSAllowsArbitraryLoads 在 macOS 26 上会被拦成「需要安全连接」；

@@ -2,8 +2,9 @@
 
 把 [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) 的 Web UI 包成一个原生 macOS 应用：
 双击 `.app` 就拉起本地 dsh 后端，并用原生窗口（WKWebView）承载界面。
-**非官方、本机自用**：ad-hoc 签名、没有公证，不要分发，也不要以任何形式宣传成官方出品
-（命名沿用官方推荐的 `DSH` 简称，见仓库根 `BRAND_GUIDELINES.md`）。
+**非官方**：ad-hoc 签名、没有公证，所以分发出去对方首次打开要手动放行 Gatekeeper
+（步骤见仓库根 `README.md`），也不要以任何形式宣传成官方出品
+（命名沿用官方推荐的 `DSH` 简称，见 `THIRD_PARTY_NOTICES.md` 与上游 BRAND_GUIDELINES）。
 
 ## 图标
 
@@ -33,25 +34,32 @@
 
 ```
 dsh-app/
-  runtime/           npm install 出来的 dsh 运行时（打进 .app 的 Resources/runtime）
+  runtime/           dsh 运行时：package.json + package-lock.json（锁死版本，npm ci 复现），
+                     装出来的 node_modules 打进 .app 的 Resources/runtime
   iconsrc/           图标来源素材（official.icns / official-app-icon-mac.png）
+  licenses/          Node 与 dsh 的许可原文（随 DMG 一起发出去）
   shell/
     Sources/main.swift        壳本体
     tools/list-windows.swift  验证用：列出某进程的窗口（不需要截图权限）
     make-app.sh               一键组装 .app
+    make-dmg.sh               把 .app 打成 DMG（含回挂校验与 SHA-256）
     update.sh                 更新上游 dsh（「更新」菜单与手跑都用它）
     install-app.sh            把 build/dshX.app 装到 /Applications（带运行态保护与备份）
+  .github/workflows/          CI：自动打 DMG，打 tag 就发 Release
   build/dshX.app              产物
 ```
 
 ## 构建
 
-前置：`runtime/` 里装好 dsh（一次即可）：
+前置：`runtime/` 里装好 dsh（一次即可）。仓库里已经带了 `package.json` 与
+`package-lock.json`（版本锁死），所以直接用 `npm ci` 即可复现：
 
 ```sh
-mkdir -p dsh-app/runtime && cd dsh-app/runtime
-npm init -y && npm install @deepseek-ai/dsh
+cd dsh-app/runtime && npm ci
 ```
+
+> 想跟到更新的 dsh 版本，用同目录的 `update.sh`，别手改 `package.json`：
+> `./update.sh update --yes` 会升级版本、重建 `.app`。
 
 > npm 11 的 allow-scripts 会跳过 node-pty / dsh-subprocess-local 的安装脚本。
 > 实测不影响启动（node-pty 的 `spawn-helper` 在 tarball 里已带执行位）；
@@ -60,13 +68,18 @@ npm init -y && npm install @deepseek-ai/dsh
 然后：
 
 ```sh
-cd dsh-app/shell && ./make-app.sh            # 只组装到 build/
-INSTALL=1 ./make-app.sh                       # 顺带复制到 /Applications
+cd dsh-app/shell
+./make-app.sh                  # 组装到 build/dshX.app
+./make-dmg.sh                  # 再打成 build/dshX-<版本>-<架构>.dmg（+ .sha256）
+INSTALL=1 ./make-app.sh        # 想直接装：顺带复制到 /Applications
 ```
 
 脚本做五件事：编译 Swift 壳 → ditto 拷运行时 → 下载并校验 Node 24.17.0（官方
 tarball，SHA-256 比对）→ 拷图标 + 写 Info.plist → ad-hoc 签名。全程约 20 秒，
-产物约 403MB。
+产物约 404 MB；`make-dmg.sh` 压出来约 117 MB。
+
+`VERSION`（写进 Info.plist 与 DMG 文件名）和 `NODE_ARCH`（默认跟随本机架构）
+都可以用环境变量覆盖，例如 `NODE_ARCH=x86_64 ./make-app.sh`。
 
 编译要带这两个参数，否则在受限环境里会因写不了默认 module cache 而失败：
 
@@ -214,9 +227,10 @@ rm -rf "$HOME/Library/WebKit/local.dshx.shell"        # WebView 缓存
 
 ## 已知限制
 
-- ad-hoc 签名，**不能分发**：拷给别人会被 Gatekeeper 拦（没有公证）。
-- 用了官方鲸鱼标 + 与官方相似的观感，仅限本机自用；对外宣传或分发前请换掉
-  （见 `BRAND_GUIDELINES.md` 关于不得造成官方背书误解的要求）。
+- ad-hoc 签名、**无公证**：拷给别人后首次打开会被 Gatekeeper 拦下，需要手动放行
+  （`xattr -dr com.apple.quarantine` 或「系统设置 › 隐私与安全性 › 仍要打开」）。
+- 图标用的是官方鲸鱼标，且观感与官方相近：仅作本机/自用；对外分发或商用前建议换成
+  自己的图标（`ICNS=/path/to/your.icns ./make-app.sh`，见 `THIRD_PARTY_NOTICES.md`）。
 - 没有单实例锁。正常 `open` 不会重复启动，但 `open -n` 会起第二个实例，
   两个后端会共用同一个私有 `DSH_HOME`。
 - 「能不能真跑一轮对话」没验证过：只确认了后端起来了、页面加载了、
