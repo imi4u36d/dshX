@@ -71,15 +71,23 @@ bash shell/make-dmg.sh
 全程约 20 秒，产物约 404 MB（`node_modules` 是主要体积）；`make-dmg.sh` 再压成
 约 117 MB 的 DMG。
 
+只想在本机跑、不打 DMG，可加 `INSTALL=1`：组装完交给 `shell/install-app.sh`，
+它带运行态保护与旧包备份，**装成功后默认删掉 `build/dshX.app`**（省掉那 400M
+双份）。要打 DMG 就别用 `INSTALL=1`，或加 `KEEP=1` 把产物留下。
+
 可覆盖的环境变量：
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
 | `VERSION` | `0.1.0` | 写进 `Info.plist` 的版本号，也进 DMG 文件名 |
 | `NODE_ARCH` | `uname -m` | 内置 Node 的架构，必须与壳同架构 |
+| `DEPLOY_TARGET` | `12.0` | 壳的最低 macOS。别去掉：不带 `-target` 时 `minos` 会跟 SDK 走，比对方系统还新就启动不了（-10825） |
 | `NODE_VERSION` | `24.17.0` | 内置 Node 版本 |
 | `ICNS` | `iconsrc/official.icns` | 换图标；给不存在的路径只会退回通用图标 |
 | `RUNTIME` | `runtime/` | dsh 运行时目录 |
+| `INSTALL` | `0` | 置 1 则组装完交给 `install-app.sh` 安装（只在本机自用时用） |
+| `KEEP` | `0` | 置 1 则安装后保留 `build/dshX.app`（默认删） |
+| `FORCE` | `0` | 置 1 则跳过「dshX 还在跑」拦截（自负风险） |
 
 ```sh
 # 例：Intel 机器上构建
@@ -140,7 +148,7 @@ dshX/
     make-app.sh               组装 build/dshX.app
     make-dmg.sh               把 .app 打成 DMG（含回挂校验 + SHA-256）
     update.sh                 升级 runtime/ 里的 dsh 并重建
-    install-app.sh            装到 /Applications（带运行态保护与备份）
+    install-app.sh            装到 /Applications（运行态保护、备份、装完默认清掉 build 产物）
     README.md                 壳的行为约定、验证记录、卸载方式
   iconsrc/                    图标素材（品牌约束见 THIRD_PARTY_NOTICES.md）
   runtime/

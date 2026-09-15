@@ -20,11 +20,13 @@
 #   ./update.sh update --tag next    # 跟踪某个 dist-tag（latest|next|alpha 等）
 #   ./update.sh update --version 0.2.0   # 指定确切版本，跳过自动判断
 #   ./update.sh update --install     # 重建后再装到 /Applications（会先要求退出 App）
+#   ./update.sh update --install --keep-src   # 装完保留 build/dshX.app（还要拿它打 DMG 时用）
 #   ./update.sh update --yes         # 更新前不再交互确认（自动化用）
 #   ./update.sh --runtime <dir> ...  # 覆盖 runtime 目录（默认为本脚本上一级的 runtime/）
 #
 # 约定与安全
 #   - 只动 runtime/ 与 build/；绝不碰 ~/.dsh，也不碰你正在跑的 App，除非 --install。
+#     --install 装成功后默认删掉 build/dshX.app（那 400M 双份），--keep-src 保留。
 #   - check 全程只读；没有 npm 也能跑。
 #   - 上游常用 next 标签发预发布版（latest 可能落后），所以默认把所有 dist-tag
 #     里比当前新的最高版本当候选；若各标签都不更新，再回退去 versions 里找更新的。
@@ -139,6 +141,7 @@ MODE="check"
 DRY_RUN=0
 ASSUME_YES=0
 DO_INSTALL=0
+KEEP_SRC=0
 FORCE=0
 JSON=0
 PIN_TAG=""
@@ -151,6 +154,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run)  DRY_RUN=1 ;;
     --yes|-y)   ASSUME_YES=1 ;;
     --install)  DO_INSTALL=1 ;;
+    --keep-src) KEEP_SRC=1 ;;
     --force)    FORCE=1 ;;
     --json)     JSON=1 ;;
     --tag)       PIN_TAG="${1:-}"; shift || true ;;
@@ -159,7 +163,7 @@ while [[ $# -gt 0 ]]; do
     --tag=*)     PIN_TAG="${arg#*=}" ;;
     --version=*) PIN_VERSION="${arg#*=}" ;;
     --runtime=*) RUNTIME="${arg#*=}" ;;
-    -h|--help)   sed -n '2,40p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)   sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *) c_warn "忽略未知参数：$arg" ;;
   esac
 done
@@ -273,7 +277,13 @@ run_update() {
   printf '  %s → %s\n' "$current" "$target"
   printf '  1) 在 %s 内：%s install %s@%s\n' "$RUNTIME" "$npm" "$PKG" "$target"
   printf '  2) 重跑 make-app.sh 重建 %s.app\n' "$APP_NAME"
-  [[ $DO_INSTALL -eq 1 ]] && printf '  3) 再安装到 %s\n' "$INSTALL_TARGET"
+  if [[ $DO_INSTALL -eq 1 ]]; then
+    if [[ $KEEP_SRC -eq 1 ]]; then
+      printf '  3) 再安装到 %s（--keep-src：保留 build 产物）\n' "$INSTALL_TARGET"
+    else
+      printf '  3) 再安装到 %s，装成后删掉 build/%s.app\n' "$INSTALL_TARGET" "$APP_NAME"
+    fi
+  fi
 
   if [[ $DRY_RUN -eq 1 ]]; then
     c_warn "  --dry-run：以上命令未执行。"
@@ -299,9 +309,11 @@ run_update() {
     say "安装到 /Applications"
     local installer="$SCRIPT_DIR/install-app.sh"
     if [[ -x "$installer" ]]; then
-      # 交给 install-app.sh：它会拦住「还有进程在用旧包」、做备份、装后校验签名。
+      # 交给 install-app.sh：它拦「还有进程在用旧包」、做备份、装后校验签名，
+      # 三件都过了才删 build/dshX.app（--keep-src 则保留）。
       local -a iargs=()
       [[ $FORCE -eq 1 ]] && iargs+=(--force)
+      if [[ $KEEP_SRC -eq 1 ]]; then iargs+=(--keep-src); fi
       bash "$installer" "${iargs[@]}"
     else
       c_warn "没有 install-app.sh，退回手动安装提示。装前先退出 dshX。"
@@ -313,7 +325,11 @@ run_update() {
   echo
   c_ok "更新完成：$PKG $current → $target"
   if [[ $DO_INSTALL -eq 1 ]]; then
-    echo "重开 dshX.app 即用上新的后端。"
+    if [[ $KEEP_SRC -eq 1 ]]; then
+      echo "重开 dshX.app 即用上新的后端；build/$APP_NAME.app 已按 --keep-src 保留。"
+    else
+      echo "重开 dshX.app 即用上新的后端；build/$APP_NAME.app 已清理（要保留加 --keep-src）。"
+    fi
   else
     echo "新后端在 build/$APP_NAME.app；要用它请走安装： ./update.sh update --install（或 bash install-app.sh）。"
   fi

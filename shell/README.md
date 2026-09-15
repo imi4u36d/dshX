@@ -44,7 +44,7 @@ dsh-app/
     make-app.sh               一键组装 .app
     make-dmg.sh               把 .app 打成 DMG（含回挂校验与 SHA-256）
     update.sh                 更新上游 dsh（「更新」菜单与手跑都用它）
-    install-app.sh            把 build/dshX.app 装到 /Applications（带运行态保护与备份）
+    install-app.sh            把 build/dshX.app 装到 /Applications（运行态保护 + 备份 + 装完默认清掉产物）
   .github/workflows/          CI：自动打 DMG，打 tag 就发 Release
   build/dshX.app              产物
 ```
@@ -69,10 +69,20 @@ cd dsh-app/runtime && npm ci
 
 ```sh
 cd dsh-app/shell
-./make-app.sh                  # 组装到 build/dshX.app
+./make-app.sh                  # 组装到 build/dshX.app（产物留着）
 ./make-dmg.sh                  # 再打成 build/dshX-<版本>-<架构>.dmg（+ .sha256）
-INSTALL=1 ./make-app.sh        # 想直接装：顺带复制到 /Applications
+INSTALL=1 ./make-app.sh        # 想直接装：组装完交给 install-app.sh，装成功后删掉 build 产物
+INSTALL=1 KEEP=1 ./make-app.sh # 同上，但保留 build 产物（还要接着打 DMG 就这么跑）
 ```
+
+`INSTALL=1` 不再自己 `rm + ditto`，而是叫 `install-app.sh` 干：它会先查「有没有
+进程还在用旧包」（那个 .app 里跑着的就是你自己，强装会把会话连根拔），默认
+备份旧包，`ditto` 完再对**目标**校一次签名；运行态拦截没过去就整个安装不做。
+`FORCE=1` 跳过运行态拦截（自负风险）。
+
+> 写权限之外还可能卡 macOS 14+ 的「App 管理」：系统设置 › 隐私与安全性 ›
+> App 管理，给跑脚本的终端打勾，否则 `rm`/`ditto` 会给你个 `Operation not permitted`。
+> 自测这类脚本一定用 `--dest` 指到临时目录：漏一次就把真 app 盖了（本仓库踩过）。
 
 脚本做五件事：编译 Swift 壳 → ditto 拷运行时 → 下载并校验 Node 24.17.0（官方
 tarball，SHA-256 比对）→ 拷图标 + 写 Info.plist → ad-hoc 签名。全程约 20 秒，
@@ -81,10 +91,25 @@ tarball，SHA-256 比对）→ 拷图标 + 写 Info.plist → ad-hoc 签名。�
 `VERSION`（写进 Info.plist 与 DMG 文件名）和 `NODE_ARCH`（默认跟随本机架构）
 都可以用环境变量覆盖，例如 `NODE_ARCH=x86_64 ./make-app.sh`。
 
-编译要带这两个参数，否则在受限环境里会因写不了默认 module cache 而失败：
+编译必须带这三样，少一样都会出「编得过、启动不了」：
 
 ```
-TMPDIR=<可写目录> xcrun swiftc -module-cache-path <可写目录> ...
+TMPDIR=<可写目录> -module-cache-path=<可写目录>   # 少了在受限环境里写不了缓存
+-target <arch>-apple-macosx<版本>              # 少了 minos 会跟着 SDK 走
+```
+
+`-target` 这个最容易省：不给时 `swiftc` 把 SDK 自己的版本号写进 Mach-O 的
+`LC_BUILD_VERSION`（实测 `minos 28.0`），LaunchServices 按「要求比当前系统还新」
+直接拒启动，报 `-10825`；`Info.plist` 里的 `LSMinimumSystemVersion` 拦不下它，
+它以 Mach-O 为准。脚本现在默认 `-target …-macosx12.0`（`DEPLOY_TARGET` 可改），
+并在编完后拿 `minos` 与本机系统版本号比一句，不匹配就退出而不是给你个跑不起来的包。
+
+装完想确认它真能启动（别只看签名，签名过不代表能启动）：
+
+```sh
+otool -l /Applications/dshX.app/Contents/MacOS/dshX | grep -A4 LC_BUILD_VERSION  # minos 应 ≤ 系统
+open /Applications/dshX.app            # 报 -10825 就是上面那个坑
+swift shell/tools/list-windows.swift   # 健在时窗口标题会带后端端口
 ```
 
 ## 壳的行为约定
@@ -132,7 +157,8 @@ dshX 只是壳，**真正跑的后端是打包进 `.app` 的 npm 包 `@deepseek-
 ./update.sh                       # 只看有没有新版（只读，一次网络请求，不改动）
 ./update.sh update --dry-run      # 打印将要执行的命令，不真的装
 ./update.sh update --yes          # 升级 runtime/ 里的 @deepseek-ai/dsh 并重建 build/dshX.app
-./update.sh update --yes --install  # 再装到 /Applications（需先完全退出 dshX）
+./update.sh update --yes --install  # 再装到 /Applications（需先完全退出 dshX；装成后默认删 build 产物）
+./update.sh update --yes --install --keep-src  # 同上，但保留 build/dshX.app（还要打 DMG 用）
 ./update.sh update --tag next --yes   # 跟 next 标签（上游预发布常发在 next）
 ./update.sh update --version 0.2.0 --yes  # 指定确切版本
 ```
@@ -145,7 +171,8 @@ dshX 只是壳，**真正跑的后端是打包进 `.app` 的 npm 包 `@deepseek-
 - `update` 需要 `npm`（`check` 不需要）。装了 Node 即带 npm；没有会直接告诉你
   怎么装，不会瞎跑。默认会弹一次 `y/N` 确认。
 - 只动 `runtime/` 与 `build/`，不碰 `~/.dsh`。`--install` 才写 `/Applications`，
-  且要求 dshX 没在跑（避免覆盖正在运行的后端），否则停下让你先退。
+  且要求 dshX 没在跑（避免覆盖正在运行的后端），否则停下让你先退。装成功后
+  它会把 `build/dshX.app` 交给 `install-app.sh` 删掉（那 400M 双份），`--keep-src` 保留。
 
 **「更新」菜单**（菜单栏 `更新 ›`）：顶部显示当前 dsh 版本，下面「检查更新…」
 「更新并重建（终端）…」会**打开一个终端窗口跑 `update.sh`**，你能直接看到它
@@ -171,18 +198,25 @@ dshX 只是壳，**真正跑的后端是打包进 `.app` 的 npm 包 `@deepseek-
 cd dsh-app/shell
 bash make-app.sh                 # 1) 离线重建到 build/dshX.app（约 20 秒，用缓存的 Node）
 open ../build/dshX.app           # 2) 想先试试：直接跑 build 里这份，独立于已装的、也独立于当前会话
-bash install-app.sh --launch     # 3) 想常驻：先退出已装的 dshX，再装到 /Applications 并重开
+bash install-app.sh --launch     # 3) 想常驻：先退出已装的 dshX，再装、重开，并删掉 build 里那份
 ```
+
+第 2 步和第 3 步要二选一：`install-app.sh` 默认装完就删 `build/dshX.app`（省那 400M
+双份），所以先试再装请用 `--keep-src`，或者直接 `open` 完了再装。
 
 `install-app.sh` 的保护：
 
 - **还有进程在用旧包就直接拒绝**（界面进程，或某个还在引用
   `/Applications/dshX.app` 的后端——比如正承载你当前会话的那个）。**别在还开着
   dshX 窗口 / 会话时强装**，会把正在跑的后端连根拔起。先退出再装。
-- 默认把旧包备份成 `/Applications/dshX.app.bak.<时间戳>`（留最近 3 份），可回退。
-- 装后校验签名；`/Applications` 不可写时给出手动 `ditto` 命令。
-- `--dry-run` 只看会做什么、不动；`--force` 跳过运行态检查（自负风险）；
-  `--src <path>` 换源。
+- 默认把旧包备份到同目录 `dshX.app.bak.<时间戳>`（留最近 3 份），可回退。
+- 装后只对**目标**校验签名；不过就只给警告（ad-hoc 包偶尔这样）并且不删源包，
+  方便你拿原产物重试。`/Applications` 不可写时给出手动 `ditto` 命令。
+- 装成功后默认删掉 `build/dshX.app`（副本之间不互相引用，删源不影响已装那份）。
+  但只有源确实位于本仓库 `build/` 下才删 —— `--src` 指到别处时只装不删。
+- `--dry-run` 只看会做什么、不动（连删产物也只打印）；`--force` 跳过运行态检查
+  （自负风险）；`--keep-src` 保留源包；`--src <path>` / `--dest <path>` 换源与换目标
+  （拿 `--dest` 指到临时目录就能不碰真 app 地验证脚本）。
 
 > 让「更新」菜单能一键找到脚本：用**仓库工作目录**启动（
 > `DSH_APP_WORKSPACE=/path/to/dsh-app`），或给 App 设 `DSH_UPDATE_SCRIPT=/路径/update.sh`。
