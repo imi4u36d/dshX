@@ -225,7 +225,7 @@ dshX 只是壳，**真正跑的后端也打包在 `.app` 里**
   可换成任意形状相同的 JSON，包括 `http://127.0.0.1:…`，方便演练）。
 - **怎么算「有新版本」**：拿每个 Release 的 tag 抠出版本号，跟 Info.plist 里
   `CFBundleShortVersionString`（也就是 `make-app.sh` 的 `VERSION`）比。只有**更新**才算，
-  所以 0.1.2 对着 0.1.1 会老实说「已是最新」；比较规则与 `update.sh` 里那段 awk 一致
+  所以 0.2.0 对着 0.1.1 会老实说「已是最新」；比较规则与 `update.sh` 里那段 awk 一致
   （预发布号、`+build` 都按 semver 处理），`tools/update-check-test` 拿 400 组随机版本号
   跟 awk 对拍过，必须一致。默认忽略 `prerelease: true` 的 Release，
   `DSHX_ALLOW_PRERELEASE=1` 才跟。

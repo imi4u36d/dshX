@@ -40,6 +40,10 @@ DEPLOY_TARGET="${DEPLOY_TARGET:-12.0}"
 NODE_DIR="node-v${NODE_VERSION}-darwin-${NODE_ARCH}"
 NODE_TARBALL="${NODE_DIR}.tar.gz"
 CACHE="$ROOT/.downloads"
+# 下载缓存必须在任何 curl 之前就已存在：pnpm 那一步排在 Node 前面，而 mkdir 原先
+# 只写在 Node 那一步里。本机 .downloads/ 早就存在，这个坑只有干净机器（CI、新克隆）
+# 才会踩到——报的是 curl 56「写不出文件」，看着像网络问题，其实是没目录。
+mkdir -p "$CACHE"
 RUNTIME="${RUNTIME:-$ROOT/runtime}"
 
 say() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
@@ -124,7 +128,6 @@ cp "$SHELL_DIR/updater/apply-update.sh" "$APP/Contents/Resources/updater/apply-u
 chmod +x "$APP/Contents/Resources/updater/apply-update.sh"
 
 say "准备内置 Node v${NODE_VERSION}（${NODE_ARCH} 官方 tarball，校验 SHA-256）"
-mkdir -p "$CACHE"
 if [[ ! -f "$CACHE/$NODE_TARBALL" ]]; then
   curl -fsSL -o "$CACHE/$NODE_TARBALL.part" "https://nodejs.org/dist/v${NODE_VERSION}/${NODE_TARBALL}"
   curl -fsSL -o "$CACHE/SHASUMS256.txt" "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt"
