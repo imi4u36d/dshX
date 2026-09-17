@@ -66,7 +66,7 @@ bash shell/make-app.sh
 bash shell/make-dmg.sh
 ```
 
-`make-app.sh` 干五件事：编译 Swift 壳（`main.swift` + `market.swift` + `updater.swift`）
+`make-app.sh` 干五件事：编译 Swift 壳（`main.swift` + `updater.swift`）
 → `ditto` 拷入 dsh 运行时、拷入 `updater/apply-update.sh`（自更新的换包脚本）→ 下载官方
 Node 并按 `SHASUMS256.txt` 校验 SHA-256 → 写图标与 `Info.plist` → ad-hoc 签名并回验。
 全程约 20 秒，产物约 404 MB（`node_modules` 是主要体积）；`make-dmg.sh` 再压成
@@ -100,37 +100,6 @@ VERSION=0.2.1 ICNS=~/my.icns bash shell/make-app.sh && bash shell/make-dmg.sh
 
 更多细节（壳的行为约定、菜单快捷键、日志位置、卸载、踩过的坑）在
 [`shell/README.md`](shell/README.md)。
-
-## 插件市场（一键安装）
-
-菜单栏「插件 › 插件市场…」（⌘⇧P）：打开 dsh 官方插件生态的目录
-（npm 上打了 `dsh-plugin` 标记的包，约 5000 个，从 npm registry 拉取，缓存 24 小时）。
-目录是**正方形网格**：每张卡片是插件展示图 + 名称/版本/周下载量/简介 + 安装状态角标；
-顶部可**搜索**（插件名、描述、关键词三路匹配），并按**热门**（npm 周下载量）、
-**最新**、**名称**切换榜单；点卡片弹出大尺寸**详情页**（横幅大图、作者、许可、
-更新时间、下载量、关键词、npm/仓库/主页外链，以及将要执行的确切 `spec`）。
-目录有几千条，网格**分屏渲染**（首屏 60 张，滚到底自动续，也可点「加载更多」）。
-日间/夜间主题与 APP 的外观设置保持一致。点安装即在壳里跑官方的
-`dsh plugin --profile web add <name>@<version>`——与终端手敲完全同一条链路；
-pnpm 已打进 .app（`shell/make-app.sh` 下载并校验 SHA-256），所以没装 pnpm 的机器
-也能一键安装。
-
-- 「官方插件市场」不是托管服务：dsh 的官方插件分发面就是 npm（上游约定的标记是
-  `dsh-plugin`，见 deepseek-harness 的 README/CONTRIBUTING）。目录只是那份清单的
-  列表；所有条目都是第三方包，本项目不做任何验证——安装弹窗会列出将执行的确切
-  spec，确认再装。
-- 插件层在重启后端后组装生效；安装成功的弹窗里有一键「重启后端」。
-- 个别插件带原生依赖（如 dsh-knowledge 的 onnxruntime/sharp），pnpm 默认拒绝跑
-  它们的构建脚本，安装会报错——这是上游 pnpm 的 allowBuilds 策略，不是壳的故障。
-- 展示图从插件的 `repository` 推导（GitHub 归属者头像 + 仓库 OG 图），不额外维护；
-  拿不到或加载失败时退回「首字母 + 配色」图块。内置种子目录由
-  `node shell/tools/build-catalog.mjs` 从 npm 重新生成（全量翻页，含热度与链接）。
-- 打开市场时的后台刷新**只更新缓存、不换界面**：全量目录的在线结果几乎必然与本地
-  种子不同，直接重画会冲掉正在输入的搜索词与滚动位置。想要立刻取最新就点界面上的
-  「刷新」。
-- 覆盖点（设环境变量，重启 dshX 生效）：`DSH_PLUGIN_CATALOG` 指定本地目录文件；
-  `DSH_PLUGIN_CATALOG_URL` 换目录来源；`DSH_APP_PNPM_DIR` 换 pnpm 位置；
-  `DSH_APP_PROFILE` 换活跃 profile（默认 `web`）。
 
 ## 自动打包（GitHub Actions）
 
@@ -176,11 +145,8 @@ gh workflow run release-dmg.yml -f version=0.2.0-test
 dshX/
   shell/
     Sources/main.swift        壳本体（Swift + AppKit + WebKit）
-    Sources/market.swift      插件市场：目录数据源 + 一键安装（与手敲 `dsh plugin add` 同链路）
     Sources/updater.swift     检查更新：查 GitHub Releases、比版本、下载校验、换包重启
-    Resources/catalog.json    打包默认市场目录（未验证清单，约 5000 条，由 tools/build-catalog.mjs 生成）
     updater/apply-update.sh   换包执行者（App 退出后接管：挂 DMG → 替换 → 重开）
-    tools/build-catalog.mjs   从 npm 全量翻页生成上面那份目录（含热度/链接/展示图 URL）
     tools/                    验证用小工具：列窗口、比对图标、update-check-test（演练更新链路）
     make-app.sh               组装 build/dshX.app
     make-dmg.sh               把 .app 打成 DMG（含回挂校验 + SHA-256）
@@ -203,19 +169,21 @@ dshX/
 
 ## 更新
 
-菜单 **更新 ›** 里是两条完全不同的路，别混。
+更新只有一条路：查 GitHub Releases（dshX 仓库），把**整个 `.app`** 换掉。菜单里仅此一项
+**dshX › 检查更新…**（⌘U，紧挨「关于 dshX」）。开发机想升级仓库 `runtime/` 里的
+`@deepseek-ai/dsh`，用 [`shell/update.sh`](shell/README.md) 这个命令行工具，它不在菜单里。
 
-### ① 检查更新…（⌘U）——自更新整个 App
+### 检查更新…（⌘U）——自更新整个 App
 
-装好之后想升级，就点 **更新 › 检查更新…**。它读 GitHub Releases
+装好之后想升级，就点菜单栏 **dshX › 检查更新…**。它读 GitHub Releases
 （默认 `https://api.github.com/repos/imi4u36d/dshX/releases`），拿上面最新的 tag
 跟**当前 App 自己的版本**比，弹窗里两个版本号都写出来，好让你自己核对：
 
 - 没有更高的版本 → 弹「已是最新版本」，列出当前版本与更新源上的最新版本
   （0.2.0 对着 0.1.1 会说「已是最新」，不会让你降级）。
 - 有更高的版本 → 弹「发现新版本 dshX X（当前 Y）」，写明版本、tag、包名与大小、
-  要替换掉哪个 `.app`，给两个按钮：**更新并重启** / **取消**。
-- 想自己去下载页翻，旁边有「在浏览器里打开 Releases 页」。
+  要替换掉哪个 `.app`，给两个按钮：**更新并重启** / **取消**；取消的弹窗里也带着
+  Releases 页地址，想手动下就去那儿。
 
 选「更新并重启」之后：下载对应架构的 `.dmg`（100 多 MB，一两分钟）→ 按 Releases
 给的 SHA-256 校验（下载项没带 `digest` 就改取同名的 `.sha256`；对不上直接停下，
@@ -232,11 +200,6 @@ dshX/
   硬来，会保留备份，弹窗里给出日志路径和 Releases 页。
 - 换完的新包仍是 ad-hoc 签名。App 内下载的文件不带 quarantine 标记，正常不会再被
   Gatekeeper 拦一次；从别处拷来的 DMG 仍要先按上面「下载安装」的办法放行。
-
-### ② 更新后端 dsh（终端跑 update.sh）…（⌘⇧U）——开发机链路
-
-需要源码仓库和 npm：把 `runtime/` 里的 `@deepseek-ai/dsh` 升到新版并重建 `.app`。
-只在开发这台机器上有意义，装好的 App 用不到它，细节见 [`shell/README.md`](shell/README.md)。
 
 ### 更新相关的调试开关（设了才生效，重启 dshX）
 
@@ -263,11 +226,9 @@ bash shell/tools/update-check-test/rehearse-update.sh # 假更新源 + 假 App�
   默认工作目录 `~/Library/Application Support/dshX/workspace`。
 - 日志：`~/Library/Application Support/dshX/backend.log`（启动失败先看它）。
 - 退出会带走后端，不留孤儿端口（正常退出 / `SIGTERM` / `kill -9` 三条路径都覆盖）。
-- 菜单：**文件 › 选择工作目录并重启后端**（⌘O）、**查看 › 重启后端**（⌘⇧R）、
-  拷贝后端地址（⌘⇧C）、在默认浏览器中打开（⌘⇧B），以及 **更新 ›** 与 **插件 ›**
-  （插件市场 ⌘⇧P：装卸载都走 `dsh plugin` 链路，详见「插件市场」一节）。
-  **更新 ›** 顶部一行写着当前 App 与后端版本，往下是 检查更新…（⌘U）与
-  在浏览器里打开 Releases 页，再往下才是开发机用的 update.sh，详见「更新」一节。
+- 菜单：**dshX › 检查更新…**（⌘U，紧挨「关于 dshX」，详见「更新」一节）、
+  **文件 › 选择工作目录并重启后端**（⌘O）、**查看 › 重启后端**（⌘⇧R）、
+  拷贝后端地址（⌘⇧C）、在默认浏览器中打开（⌘⇧B）。
 - 整页不滚、不缩放（壳侧注入 CSS + 关掉缩放），内部滚动区照旧能滚。
 
 ## 已知限制

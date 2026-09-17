@@ -189,9 +189,9 @@ final class Backend {
             if let value = ProcessInfo.processInfo.environment[key] { env[key] = value }
         }
         // 内置 pnpm 必须出现在这条 PATH 上：make-app.sh 把它打进
-        // Contents/Resources/tools/bin，插件安装链路靠 execvp('pnpm') 找它。
+        // Contents/Resources/tools/bin，`dsh plugin` 的安装链路靠 execvp('pnpm') 找它。
         // 图形界面启动不继承终端 PATH，本机也没有 npm/corepack，漏掉这一项
-        // 内置 pnpm 就形同虚设，插件市场一律报「找不到 npm/corepack」。
+        // 内置 pnpm 就形同虚设，插件安装一律报「找不到 npm/corepack」。
         // bundle 取不到（源码方式直跑壳）时从 node 路径上推三层回到 Resources。
         let resources = Bundle.main.resourceURL
             ?? plan.node.deletingLastPathComponent()
@@ -568,12 +568,6 @@ final class ShellController: NSObject, WKNavigationDelegate, NSApplicationDelega
         boot()
     }
 
-    /// 插件市场窗口（market.swift）。目录数据面是 npm 的 dsh-bundle 生态，
-    /// 执行面与手敲 `dsh plugin add` 完全一致；安装成功后的重启从这里回来。
-    @objc func openMarket() {
-        MarketController.shared.show()
-    }
-
     /// WebKit 没有公开的「打开 Web Inspector」API；已开 developerExtrasEnabled，
     /// 页面里右键 → Inspect Element 可用。这里改为拷贝带 token 的后端地址。
     @objc func copyServerURL() {
@@ -609,137 +603,12 @@ final class ShellController: NSObject, WKNavigationDelegate, NSApplicationDelega
     @objc func checkForUpdate() {
         UpdateController.shared.check()
     }
-
-    @objc func openReleasesPage() {
-        UpdateController.shared.openReleasesPage()
-    }
-
-    /// 开发机链路：在终端里跑 `update.sh update`，改的是仓库 runtime/ 里的
-    /// @deepseek-ai/dsh 并重打包。真正换后端无法由页面完成，必须在 App 外部执行。
-    @objc func updateUpstream() {
-        guard let script = findUpdateScript() else {
-            presentManualFallback(
-                "没有检测到 update.sh",
-                "更新 dsh 依赖要在 App 外部做：改 runtime/、重跑 make-app.sh 重建 .app，再重开。"
-                + "设 DSH_UPDATE_SCRIPT=/路径/update.sh，或用带 shell/update.sh 的仓库工作目录启动 App，即可一键触发。",
-                command: "cd <dsh-app>/shell && ./update.sh update")
-            return
-        }
-        shellLog("一键更新：bash \(script) update")
-        openInTerminal("bash '\(script)' update")
-    }
-
-    @objc func copyUpdateCommand() {
-        let command = "cd <dsh-app>/shell && ./update.sh check"
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(command, forType: .string)
-    }
 }
 
-// MARK: - 上游更新（dsh 版本）
-
-private let dshPackageName = "@deepseek-ai/dsh"
-
-/// 读出当前实际运行的 dsh 版本：先查随 App 交付的私有 runtime，再查工作目录里
-/// 的仓库 runtime。读不到返回 nil（菜单据此显示「版本未知」）。
-private func currentDshVersion() -> String? {
-    let fm = FileManager.default
-    let resources = Bundle.main.resourceURL
-        ?? URL(fileURLWithPath: "/nonexistent")
-    var candidates = [
-        resources.appendingPathComponent("runtime/node_modules/\(dshPackageName)/package.json").path,
-    ]
-    if let workspace = envString("DSH_APP_WORKSPACE"), !workspace.isEmpty {
-        candidates.append(workspace + "/runtime/node_modules/\(dshPackageName)/package.json")
-    }
-    for path in candidates {
-        guard let data = fm.contents(atPath: path),
-              let text = String(data: data, encoding: .utf8) else { continue }
-        // 顶层第一个 "version": "x.y.z"（package.json 的 name 之后紧跟 version）。
-        guard let range = text.range(of: "\"version\"") else { continue }
-        let tail = text[range.upperBound...]
-        guard let q1 = tail.firstIndex(of: "\"") else { continue }
-        let after = tail[tail.index(after: q1)...]
-        guard let q2 = after.firstIndex(of: "\"") else { continue }
-        let version = String(after[after.startIndex..<after.index(before: q2)])
-        if !version.isEmpty { return version }
-    }
-    return nil
-}
+// MARK: - 环境变量
 
 func envString(_ key: String) -> String? {
     ProcessInfo.processInfo.environment[key]
-}
-
-/// 找到 update.sh。顺序：环境变量 DSH_UPDATE_SCRIPT → 私有目录下的一份
-/// → 记录在 update-script.txt 里的路径 → 工作目录/当前目录里的 shell/update.sh。
-/// 返回能执行到的那个绝对路径，找不到返回 nil。
-private func findUpdateScript() -> String? {
-    let fm = FileManager.default
-    var candidates: [String] = []
-    if let override = envString("DSH_UPDATE_SCRIPT"), !override.isEmpty {
-        candidates.append(override)
-    }
-    candidates.append(stateDirectory.appendingPathComponent("update.sh").path)
-    if let data = fm.contents(atPath: stateDirectory.appendingPathComponent("update-script.txt").path),
-       let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
-       !text.isEmpty {
-        candidates.append(text)
-    }
-    if let workspace = envString("DSH_APP_WORKSPACE"), !workspace.isEmpty {
-        candidates.append(workspace + "/shell/update.sh")
-        candidates.append(workspace + "/update.sh")
-    }
-    for path in candidates where fm.isExecutableFile(atPath: path) { return path }
-    return nil
-}
-
-/// 在一个新的终端窗口里跑给定命令。用 `open` 打开临时 .command 文件，走的是
-/// LaunchServices，不触发 Apple Events（那在这个环境里被权限拦）。没有终端或
-/// 打开失败时返回 false，调用方退回到「拷贝命令」。
-@discardableResult
-private func openInTerminal(_ command: String) -> Bool {
-    let dir = FileManager.default.temporaryDirectory
-        .appendingPathComponent("dshX-update", isDirectory: true)
-    try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-    let file = dir.appendingPathComponent("update-\(Int(Date().timeIntervalSince1970)).command")
-    // 末尾保留交互：命令结束后不立刻关窗，方便看日志、看 y/N 提示。
-    let body = "#!/bin/bash\n\(command)\necho\necho \"［按任意键关闭］\"; read -rsn1\n"
-    guard (try? body.write(to: file, atomically: true, encoding: .utf8)) != nil else { return false }
-    try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: file.path)
-
-    let opener = Process()
-    opener.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-    opener.arguments = ["-a", "Terminal", file.path]
-    let pipe = Pipe()
-    opener.standardError = pipe
-    do {
-        try opener.run()
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        opener.waitUntilExit()
-        if opener.terminationStatus == 0 { return true }
-        if let text = String(data: data, encoding: .utf8), !text.isEmpty {
-            shellLog("打开终端失败：\(text.trimmingCharacters(in: .whitespacesAndNewlines))")
-        }
-    } catch {
-        shellLog("打开终端失败：\(error.localizedDescription)")
-    }
-    return false
-}
-
-/// 弹一个能读的解释框，并把命令写进剪贴板，方便粘到任意终端手跑。
-private func presentManualFallback(_ title: String, _ detail: String, command: String) {
-    DispatchQueue.main.async {
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(command, forType: .string)
-        let alert = NSAlert()
-        alert.alertStyle = .informational
-        alert.messageText = title
-        alert.informativeText = detail + "\n\n已把命令复制到剪贴板：\n\(command)"
-        alert.addButton(withTitle: "好")
-        NSApp.activate(ignoringOtherApps: true)
-        alert.runModal()
-    }
 }
 
 // MARK: - 菜单装配
@@ -763,6 +632,9 @@ private func buildMainMenu() -> NSMenu {
 
     let appMenu = addSection(appTitle, to: menu)
     add(appMenu, "关于 \(appTitle)", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), "")
+    // 「检查更新…」按 macOS 惯例挨着「关于」放：它换的是整个 .app（后端跟着一起换），
+    // 与开发机链路的 update.sh 不是一回事，那条链路已经不在菜单里了。
+    add(appMenu, "检查更新…", #selector(ShellController.checkForUpdate), "u")
     appMenu.addItem(.separator())
     add(appMenu, "隐藏 \(appTitle)", #selector(NSApplication.hide(_:)), "h")
     appMenu.addItem(.separator())
@@ -786,28 +658,6 @@ private func buildMainMenu() -> NSMenu {
     add(viewMenu, "重启后端", #selector(ShellController.restartBackend), "r", [.command, .shift])
     add(viewMenu, "拷贝后端地址（含 token）", #selector(ShellController.copyServerURL), "c", [.command, .shift])
     add(viewMenu, "在默认浏览器中打开", #selector(ShellController.openInBrowser), "b", [.command, .shift])
-
-    // 「更新」有两条链路，别混：
-    //   1. 检查更新…：查 GitHub Releases（dshX 仓库）有没有更新版的 App，弹窗选
-    //      「更新并重启 / 取消」。装好的 App 走这条，不需要源码与 npm。
-    //   2. 更新后端 dsh…：开发机链路，打开终端跑仓库里的 update.sh，改 runtime/
-    //      里的 @deepseek-ai/dsh 再重打包。找不到脚本时退回「复制命令」。
-    let updateMenu = addSection("更新", to: menu)
-    let currentLine = "当前 dshX \(currentAppVersion()) · 后端 dsh \(currentDshVersion() ?? "未知")"
-    let info = updateMenu.addItem(withTitle: currentLine, action: nil, keyEquivalent: "")
-    info.isEnabled = false
-    updateMenu.addItem(.separator())
-    add(updateMenu, "检查更新…", #selector(ShellController.checkForUpdate), "u")
-    add(updateMenu, "在浏览器里打开 Releases 页", #selector(ShellController.openReleasesPage), "")
-    updateMenu.addItem(.separator())
-    add(updateMenu, "更新后端 dsh（终端跑 update.sh）…",
-        #selector(ShellController.updateUpstream), "u", [.command, .shift])
-    add(updateMenu, "拷贝更新命令", #selector(ShellController.copyUpdateCommand), "")
-
-    // 「插件」：dsh 的插件分发面就是 npm（上游约定的标记是 `dsh-plugin`），安装链路
-    // 与手敲 `dsh plugin add` 完全一致，数据源与细节见 market.swift。
-    let pluginMenu = addSection("插件", to: menu)
-    add(pluginMenu, "插件市场…", #selector(ShellController.openMarket), "p", [.command, .shift])
 
     let windowMenu = addSection("窗口", to: menu)
     add(windowMenu, "最小化", #selector(NSWindow.performMiniaturize(_:)), "m")

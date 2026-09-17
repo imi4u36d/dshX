@@ -4,10 +4,9 @@ import CryptoKit
 /*
  dshX 自更新：查 GitHub Releases → 比版本 → 下载 DMG → 校验 SHA-256 → 换包重启。
 
- 跟「更新 › 更新后端 dsh（终端跑 update.sh）」是两条不同的链路：
-   - update.sh 那条改的是**仓库里** runtime/ 的 @deepseek-ai/dsh 再重打包，属开发机链路。
-   - 这一条面向「已经装好的 App」：把整个 .app 换掉。DMG 里带着内置 Node 与整个
-     runtime，后端也跟着一起换；本机不需要源码、npm 或 Xcode。
+ 跟开发机链路的 `update.sh`（改**仓库里** runtime/ 的 @deepseek-ai/dsh 再重打包）不同，
+ 这里面向「已经装好的 App」：把整个 .app 换掉。DMG 里带着内置 Node 与整个
+ runtime，后端也跟着一起换；本机不需要源码、npm 或 Xcode。
 
  数据来源是 dshX 仓库自己的 Releases（打 tag 时 CI 把 DMG 与 .sha256 挂上去，见
  .github/workflows/release-dmg.yml）。匿名读即可，未认证 API 限流 60 次/小时，
@@ -191,17 +190,6 @@ func resolveUpdate(data: Data, current: String, arch: String,
     }
     return .failure("最新是 \(best.tag)，但那个 Release 里没有 \(arch) 用的 .dmg。"
         + "要么这个版本没发本架构的包，要么只能手动换（见 shell/README.md）。")
-}
-
-/// 从更新源推出 Releases 页地址（api.github.com/repos/a/b → github.com/a/b/releases）。
-/// 用了自定义镜像（DSH_UPDATE_FEED_URL）时就直接开那个地址，方便排查。
-func releasesPageURL(feed: String) -> String {
-    let marker = "api.github.com/repos/"
-    guard let range = feed.range(of: marker) else { return feed }
-    let tail = String(feed[range.upperBound...]).split(separator: "?").first.map(String.init) ?? ""
-    let parts = tail.split(separator: "/").prefix(2).map(String.init)
-    guard parts.count == 2 else { return feed }
-    return "https://github.com/" + parts.joined(separator: "/") + "/releases"
 }
 
 // MARK: - 引擎（只做事，不画界面）
@@ -552,16 +540,6 @@ final class UpdateController: NSObject {
         engine.check()
     }
 
-    @objc func openReleasesPage() {
-        let target = releasesPageURL(feed: updateFeedURL())
-        guard let url = URL(string: target) else {
-            notify("这个地址打不开：\(target)")
-            return
-        }
-        shellLog("打开 Releases 页：\(target)")
-        NSWorkspace.shared.open(url)
-    }
-
     // MARK: 弹窗
 
     private func present(_ result: UpdateCheck) {
@@ -721,7 +699,7 @@ func sha256(of url: URL) -> String? {
 }
 
 /// 找换包脚本：环境变量 → 随 App 打包的那份 → 私有目录 → 仓库工作目录。
-/// 顺序与 findUpdateScript 一致；用 `/bin/sh 脚本` 起，所以只要求能读。
+/// 用 `/bin/sh 脚本` 起，所以只要求能读。
 func findApplyScript() -> String? {
     let fm = FileManager.default
     var candidates: [String] = []

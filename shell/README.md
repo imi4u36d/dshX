@@ -40,14 +40,13 @@ dsh-app/
   licenses/          Node 与 dsh 的许可原文（随 DMG 一起发出去）
   shell/
     Sources/main.swift        壳本体
-    Sources/market.swift      插件市场
     Sources/updater.swift     检查更新：读 Releases、比版本、挑包、下载校验、拉起换包脚本
     updater/apply-update.sh   换包执行者（App 退出后由它挂 DMG、替换、重开）
     tools/list-windows.swift  验证用：列出某进程的窗口（不需要截图权限）
     tools/update-check-test/  验证用：更新链路的离线用例 + 假更新源全流程演练
     make-app.sh               一键组装 .app（updater.swift 与换包脚本一起打进去）
     make-dmg.sh               把 .app 打成 DMG（含回挂校验与 SHA-256）
-    update.sh                 更新上游 dsh（开发机链路，菜单最下面那条）
+    update.sh                 更新上游 dsh（开发机链路，只在终端里跑，不在菜单里）
     install-app.sh            把 build/dshX.app 装到 /Applications（运行态保护 + 备份 + 装完默认清掉产物）
   .github/workflows/          CI：自动打 DMG，打 tag 就发 Release
   build/dshX.app              产物
@@ -88,7 +87,7 @@ INSTALL=1 KEEP=1 ./make-app.sh # 同上，但保留 build 产物（还要接着�
 > App 管理，给跑脚本的终端打勾，否则 `rm`/`ditto` 会给你个 `Operation not permitted`。
 > 自测这类脚本一定用 `--dest` 指到临时目录：漏一次就把真 app 盖了（本仓库踩过）。
 
-脚本做五件事：编译 Swift 壳（`main.swift` + `market.swift` + `updater.swift` 一起编）→
+脚本做五件事：编译 Swift 壳（`main.swift` + `updater.swift` 一起编）→
 ditto 拷运行时、拷 `updater/apply-update.sh` 到 `Resources/updater/` → 下载并校验
 Node 24.17.0（官方 tarball，SHA-256 比对）→ 拷图标 + 写 Info.plist → ad-hoc 签名。
 全程约 20 秒，产物约 404 MB；`make-dmg.sh` 压出来约 117 MB。
@@ -146,80 +145,23 @@ swift shell/tools/list-windows.swift   # 健在时窗口标题会带后端端口
   正常退出（`applicationShouldTerminate` → `stop()`）、`SIGTERM`/`SIGINT` 的
   DispatchSource 兜底、以及 `kill -9`/Force Quit 时由内嵌的 sh 看门狗按
   「父进程还在不在」收掉 node。
-- 菜单：**文件 › 选择工作目录并重启后端**（⌘O）、**查看 › 重启后端**（⌘⇧R）、
-  拷贝后端地址（⌘⇧C，含 token，可粘给浏览器）、在默认浏览器中打开（⌘⇧B）、
-  以及一个 **更新 ›** 菜单（两条更新链路的分工见「更新」一节）和 **插件 ›** 菜单。
+- 菜单：**dshX › 检查更新…**（⌘U，紧挨「关于 dshX」，见「更新」一节）、
+  **文件 › 选择工作目录并重启后端**（⌘O）、**查看 › 重启后端**（⌘⇧R）、
+  拷贝后端地址（⌘⇧C，含 token，可粘给浏览器）、在默认浏览器中打开（⌘⇧B）。
   调试用：页面里右键 › Inspect Element（developerExtrasEnabled 已开；WebKit 没有
   公开的「打开 Web Inspector」API）。
 
-## 插件市场（market.swift）
-
-dsh 的插件安装通道只有一条：`dsh plugin --profile <name> add <spec>`——它是 dsh CLI
-的 `plugin` 子命令，在 `$DSH_HOME/profiles/<name>/` 里把参数转发给 pnpm，成功后把
-声明了 `dsh.bundle` 的包 reconcile 进 profile manifest 的 `dsh.profile.bundles`
-层栈。市场窗口做的只是给这条通道配一个目录数据源与原生入口：
-
-- 目录：打开市场页时后台取 npm 的 `-/v1/search`，关键词取 `dsh-plugin` 与
-  `dsh-bundle` 两路并集（**`dsh-plugin` 才是上游约定的标记**，见
-  deepseek-harness 的 README/CONTRIBUTING 指向的 `github.com/topics/dsh-plugin`；
-  `dsh-bundle` 只是与字段名同款、几乎没人用的标签，单独用它只覆盖生态的约 2%
-  ——实测 83 / 4972）。npm search 单页上限 250，所以逐页翻全（约 20 次请求），
-  页间限速 0.4s、429/5xx 退避重试；结果合并去重后写进
-  `~/Library/Application Support/dshX/plugin-catalog-cache-v2.json`，24 小时内复用；
-  （文件名带 v2：数据面换过一次，旧缓存只有 83 条，沿用旧名会被 24h 新鲜度规则
-  优先采用、盖住全量种子。旧文件不删，当惰性用户数据留着。）
-  取不到退回上次缓存，再退回打包内置的 `Resources/catalog.json`（全量种子）。
-  `DSH_PLUGIN_CATALOG_URL` 可覆盖为单 URL（此时只取这一个，用于自备策展目录）。
-- 界面（壳侧自绘 HTML：不加载任何远程代码，只加载远程图片）：
-  正方形网格卡片（展示图 + 名称/版本/周下载量/两行简介 + 状态角标）；
-  搜索走名称、描述、关键词三路本地过滤；榜单可切 热门（npm 周下载量，默认）/
-  最新（updated）/ 名称；点卡片弹出大尺寸详情页（横幅大图、作者、许可、
-  更新时间、下载量、关键词、npm/仓库/主页外链、将执行的确切 spec、安装或卸载）。
-  目录里的描述与关键词一律以 `textContent` 注入，不当 HTML 解析。
-- 分屏渲染：目录是全量的（近 5000 条），一次铺完要建几千个 DOM 节点和几千个
-  `<img>`，所以首屏只铺 60 张，滚到底由 `IntersectionObserver` 自动续，另有
-  「加载更多」按钮兜底；搜索/排序变化回到第一屏。缩略图用 `loading="lazy"`，
-  视口外的格子不会发请求。
-- 刷新策略：打开市场时用的是本地（缓存或内置种子），后台拉到的在线结果**只写
-  缓存、不换界面**——全量目录下在线结果几乎必然与本地不同（下载量一直在变），
-  直接重画会冲掉用户正在输入的搜索词与滚动位置；下次打开生效。用户显式点
-  「刷新」时才立刻换（`showPage(refreshingRemote:applyRemote:)` 的 `applyRemote`）。
-  壳侧另有一道内容指纹（名字/版本/状态/主题的 FNV-1a），内容没变就整页跳过重载。
-- 展示图：npm 元数据里没有图标字段，所以从 `repository` 推导 GitHub 归属者头像
-  （正方形，卡片用）与仓库 OG 卡片图（宽图，详情横幅用）。头像要经
-  `github.com/<owner>.png` 302 跳到 avatars CDN，首帧必然有空窗期，所以卡片
-  **先铺「首字母 + 名字哈希配色」的图块**，远程图加载完再淡入覆盖，失败就只留
-  图块、永不空白。OG 图会被 GitHub 间歇性限流（429），只当渐进增强，不做依赖。
-  没打 `dsh-plugin`/`dsh-bundle` 标签的包也可以手动加进目录——但 GitHub 的
-  topic 只能给仓库（装不了），市场的唯一安装面是 npm，所以数据源始终以 npm 为准。
-- 主题：读 `$DSH_HOME/settings.yaml` 的 `ui-theme.preference`（light/dark/system），
-  与 APP 里的外观设置保持一致。显式 light/dark 会钉住窗口 `NSAppearance`
-  （标题栏一起变），system 时交回系统并监听 `prefers-color-scheme` 实时切换。
-  窗口重新获得焦点时会重读一次偏好，变了就增量换肤（不整页重画）。
-- 内置目录的生成：`node tools/build-catalog.mjs` 从 npm 全量翻页、写回
-  `Resources/catalog.json`（keywords/publisher/license/links/downloads/score/
-  updated 与推导出的图 URL）。它是**幂等**的：名称排序，重复跑 diff 稳定；
-  拉不全就报错退出、绝不写入半份种子。`make-app.sh` 只负责把这份文件拷进 `.app`。
-- 安装/卸载：页面按钮 → WKScriptMessageHandler（`dshxMarket`）→ 确认弹窗 →
-  `Process` 起 `/bin/sh -c` 跑「内嵌 bin.js + plugin --profile <active> …」；
-  市场窗口一次只跑一个子进程，输出尾部进错误弹窗与 backend.log。
-- pnpm：市场执行时子进程 PATH 前置 `Contents/Resources/tools/bin`，那里有
-  `make-app.sh` 打包生成的 pnpm 包装脚本（指向钉版本的纯 JS pnpm）；找不到
-  pnpm 时市场页会给明确提示。
-- 安装成功 → 弹窗一键「重启后端」→ 重启即按新层栈组装（重启后才生效）。
-
-## 更新（「更新」菜单里有两条链路）
+## 更新
 
 dshX 只是壳，**真正跑的后端也打包在 `.app` 里**
-（`Contents/Resources/runtime/node_modules/@deepseek-ai/dsh`）。两条链路改的东西不一样：
-「检查更新…」换的是**整个 .app**（后端跟着一起换），最下面那条改的是**仓库里的
-`runtime/` 再重建**。共同的前提：换包不能在 App 内部完成——页面正跑在被替换的那份
-后端上，所以两条路都把动作放到 App 外面。
+（`Contents/Resources/runtime/node_modules/@deepseek-ai/dsh`）。菜单里的
+**dshX › 检查更新…** 换的是**整个 .app**（后端跟着一起换）；改**仓库里的 `runtime/`
+再重建**是开发机链路，走命令行 `update.sh`，已经不在菜单里。共同的前提：换包不能在
+App 内部完成——页面正跑在被替换的那份后端上，所以两条路都把动作放到 App 外面。
 
 ### 检查更新…（⌘U）＝ 换整个 App（装好的人用这条）
 
-菜单里从上往下：一行当前版本（App 与后端各写一个）、「检查更新…⌘U」、
-「在浏览器里打开 Releases 页」，再往下才是开发机用的那两条。
+菜单位置：**dshX › 检查更新…**，紧挨「关于 dshX」。
 
 - **更新源**：`https://api.github.com/repos/imi4u36d/dshX/releases`（`DSH_UPDATE_FEED_URL`
   可换成任意形状相同的 JSON，包括 `http://127.0.0.1:…`，方便演练）。
@@ -230,8 +172,8 @@ dshX 只是壳，**真正跑的后端也打包在 `.app` 里**
   跟 awk 对拍过，必须一致。默认忽略 `prerelease: true` 的 Release，
   `DSHX_ALLOW_PRERELEASE=1` 才跟。
 - **弹窗**必须同时看到「当前版本」和「最新版本」，否则你没法判断它是不是在骗你。
-  有新版时给两个选择：**更新并重启** / **取消**，取消就什么都不做（想手动下就点
-  「在浏览器里打开 Releases 页」）。
+  有新版时给两个选择：**更新并重启** / **取消**，取消就什么都不做（想手动下就按弹窗里
+  给的 Releases 页地址去下载）。
 - **选「更新并重启」之后**：下载本架构的 DMG → 按 Release 上的 `digest`
   （没有就取同名 `.sha256`）校验，对不上就地停下 → App 退出 →
   `updater/apply-update.sh` 接手：等主进程和所有还引用旧包的进程散场 → 挂 DMG →
@@ -244,10 +186,11 @@ dshX 只是壳，**真正跑的后端也打包在 `.app` 里**
 - 下载走 URLSession，落盘的文件**不带 quarantine 标记**，所以正常不会再被 Gatekeeper
   拦一次；但新包仍是 ad-hoc 签名，这点没变。
 
-### 更新后端 dsh（终端跑 update.sh）…（⌘⇧U）＝ 开发机链路
+### 开发机链路：命令行 update.sh（不在菜单里）
 
 需要源码仓库 + npm，把 `runtime/` 里的 dsh 升到新版并重建 `.app`。**装好的 App 用不到
 它**——那条路要的重建整条流水线（源码、npm、Xcode 工具链）在装好的人机器上不存在。
+壳不再给这条链路做菜单入口，直接在终端里跑。
 
 **`update.sh`** 就是这条外部链路（在本目录 `shell/`）：
 
@@ -271,18 +214,9 @@ dshX 只是壳，**真正跑的后端也打包在 `.app` 里**
 - 只动 `runtime/` 与 `build/`，不碰 `~/.dsh`。`--install` 才写 `/Applications`，
   且要求 dshX 没在跑（避免覆盖正在运行的后端），否则停下让你先退。装成功后
   它会把 `build/dshX.app` 交给 `install-app.sh` 删掉（那 400M 双份），`--keep-src` 保留。
-
-菜单靠下面任一方式找到 `update.sh`（都不满足就只能手抄命令跑）：
-
-- 环境变量 `DSH_UPDATE_SCRIPT=/绝对路径/update.sh`（最直接）；
-- `~/Library/Application Support/dshX/update.sh`（放一份进去）；
-- 用**仓库工作目录**启动 App（`DSH_APP_WORKSPACE=/path/to/dsh-app`，它会去
-  `<工作目录>/shell/update.sh` 找）；
-- 或 `~/Library/Application Support/dshX/update-script.txt` 写一行脚本路径。
-
-> 菜单里这条只是**入口**：真正的更新在你自己的终端里发生，`npm install` +
-> 重建都在那里面完成。本仓库的 `update.sh` 默认不改 `/Applications`、不自动重开
-> App——这些留给你手动确认，符合「本机自用、改动可控」的取向。
+- 真正的更新都在你自己的终端里发生，`npm install` + 重建也在那里面完成。
+  本仓库的 `update.sh` 默认不改 `/Applications`、不自动重开 App——这些留给你手动
+  确认，符合「本机自用、改动可控」的取向。
 
 ### 怎么在不碰真 app 的前提下验一遍
 
@@ -328,10 +262,6 @@ bash install-app.sh --launch     # 3) 想常驻：先退出已装的 dshX，再�
 - `--dry-run` 只看会做什么、不动（连删产物也只打印）；`--force` 跳过运行态检查
   （自负风险）；`--keep-src` 保留源包；`--src <path>` / `--dest <path>` 换源与换目标
   （拿 `--dest` 指到临时目录就能不碰真 app 地验证脚本）。
-
-> 让「更新」菜单能一键找到脚本：用**仓库工作目录**启动（
-> `DSH_APP_WORKSPACE=/path/to/dsh-app`），或给 App 设 `DSH_UPDATE_SCRIPT=/路径/update.sh`。
-> 否则菜单只会「复制命令」让你粘到终端手跑。
 
 日志：`~/Library/Application Support/dshX/backend.log`（后端原始输出 +
 `[shell]` 前缀的壳自身判断，启动失败先看它）。

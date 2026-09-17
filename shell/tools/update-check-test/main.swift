@@ -216,8 +216,6 @@ func runResolveCases() {
                                    includePrerelease: false)),
            "认不出的正文（限流页 / 坏镜像）报 failure")
 
-    expect(releasesPageURL(feed: "https://api.github.com/repos/imi4u36d/dshX/releases?per_page=30")
-           == "https://github.com/imi4u36d/dshX/releases", "从 API 地址推出 Releases 页")
     // tag 的三种真实写法：dshX 仓库的 v0.1.1、上游的 dsh-v0.1.6-alpha.1、裸版本号。
     expect(extractVersion("v0.1.1") == "0.1.1", "从 v0.1.1 里认出版本号")
     expect(extractVersion("dsh-v0.1.6-alpha.1") == "0.1.6-alpha.1",

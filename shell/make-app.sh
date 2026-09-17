@@ -58,8 +58,8 @@ TMPDIR="$ROOT/.tmp" xcrun swiftc -swift-version 5 -O \
   -target "${NODE_ARCH}-apple-macosx${DEPLOY_TARGET}" \
   -module-cache-path "$ROOT/.modulecache" \
   -framework AppKit -framework WebKit \
-  "$SHELL_DIR/Sources/main.swift" "$SHELL_DIR/Sources/market.swift" \
-  "$SHELL_DIR/Sources/updater.swift" -o "$APP/Contents/MacOS/$APP_NAME"
+  "$SHELL_DIR/Sources/main.swift" "$SHELL_DIR/Sources/updater.swift" \
+  -o "$APP/Contents/MacOS/$APP_NAME"
 
 # 编译成功不代表能启动：minos 一旦高于用户系统，双击只会得 -10825。
 MINOS="$(otool -l "$APP/Contents/MacOS/$APP_NAME" 2>/dev/null | awk '/minos/{print $2; exit}')"
@@ -114,10 +114,6 @@ DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 exec node "$DIR/../pnpm/package/bin/pnpm.cjs" "$@"
 SH
 chmod +x "$APP/Contents/Resources/tools/bin/pnpm"
-# 市场目录：默认打包进 .app；运行时可被 DSH_PLUGIN_CATALOG 指向的本地文件覆盖。
-if [[ -f "$SHELL_DIR/Resources/catalog.json" ]]; then
-  cp "$SHELL_DIR/Resources/catalog.json" "$APP/Contents/Resources/catalog.json"
-fi
 
 say "拷入换包脚本（「检查更新」用）"
 # 「换包」这一步没法在 App 里做（后端正跑在被替换的那份包里），由 App 退出后
