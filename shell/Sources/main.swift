@@ -18,8 +18,8 @@ import WebKit
    - 导航只留在回环地址内；外部链接交给系统默认浏览器。
  */
 
-private let appTitle = "dshX"
-private let bootTimeoutSeconds: TimeInterval = 120
+let appTitle = "dshX"
+let bootTimeoutSeconds: TimeInterval = 120
 
 // MARK: - 整页滚动 / 缩放开关
 //
@@ -64,29 +64,29 @@ private let fixedShellGuardScript = """
 
 // MARK: - 运行资源解析
 
-private struct RuntimePlan {
+struct RuntimePlan {
     let node: URL
     let entry: URL
     let home: URL
     let workspace: URL
 }
 
-private let stateDirectory: URL = {
+let stateDirectory: URL = {
     let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
         ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
     return support.appendingPathComponent("dshX", isDirectory: true)
 }()
 
-private var logFileURL: URL { stateDirectory.appendingPathComponent("backend.log") }
+var logFileURL: URL { stateDirectory.appendingPathComponent("backend.log") }
 
 /// 解析结果；失败时带一句能直接读给人看的说明。
-private enum PlanOutcome {
+enum PlanOutcome {
     case success(RuntimePlan)
     case failure(String)
 }
 
 /// 解析可用的 node、dsh 入口、私有 DSH_HOME、工作目录。
-private func resolvePlan(workspaceOverride: String? = nil) -> PlanOutcome {
+func resolvePlan(workspaceOverride: String? = nil) -> PlanOutcome {
     let fm = FileManager.default
     let env = ProcessInfo.processInfo.environment
     let resources = Bundle.main.resourceURL ?? URL(fileURLWithPath: "/nonexistent")
@@ -153,7 +153,7 @@ done
 """
 
 /// 一个 dsh 后端子进程。整类只在主线程使用，IO 回调内部再切回主线程。
-private final class Backend {
+final class Backend {
     private var process: Process?
     private var pending = Data()
     private var reportedURL = false
@@ -188,7 +188,17 @@ private final class Backend {
         for key in ["HOME", "USER", "LANG", "TMPDIR"] {
             if let value = ProcessInfo.processInfo.environment[key] { env[key] = value }
         }
+        // 内置 pnpm 必须出现在这条 PATH 上：make-app.sh 把它打进
+        // Contents/Resources/tools/bin，插件安装链路靠 execvp('pnpm') 找它。
+        // 图形界面启动不继承终端 PATH，本机也没有 npm/corepack，漏掉这一项
+        // 内置 pnpm 就形同虚设，插件市场一律报「找不到 npm/corepack」。
+        // bundle 取不到（源码方式直跑壳）时从 node 路径上推三层回到 Resources。
+        let resources = Bundle.main.resourceURL
+            ?? plan.node.deletingLastPathComponent()
+                .deletingLastPathComponent()
+                .deletingLastPathComponent()
         let paths = [plan.node.deletingLastPathComponent().path,
+                     resources.appendingPathComponent("tools/bin").path,
                      "/usr/bin", "/bin", "/usr/sbin", "/sbin",
                      "/opt/homebrew/bin", "/usr/local/bin"]
         env["PATH"] = paths.joined(separator: ":")
@@ -294,15 +304,24 @@ private func writeLine(_ handle: FileHandle?, _ text: String) {
 }
 
 /// 壳自己那一侧的诊断日志（后端原始输出也写同一个文件）。
-private func shellLog(_ text: String) {
+///
+/// 必须先 seek 到末尾：`FileHandle(forWritingTo:)` 的游标停在 0，不挪就是从文件头
+/// 开始覆盖，把先前的日志（连后端的输出一起）整段冲掉——「检查更新」到底查到什么，
+/// 原本就是这么查不到的。
+func shellLog(_ text: String) {
     guard let handle = try? FileHandle(forWritingTo: logFileURL) else { return }
-    try? handle.write(contentsOf: Data("[shell] \(text)\n".utf8))
-    try? handle.close()
+    defer { try? handle.close() }
+    do {
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data("[shell] \(text)\n".utf8))
+    } catch {
+        // 日志写不进去就算了，不该影响主流程。
+    }
 }
 
 // MARK: - 壳控制器
 
-private final class ShellController: NSObject, WKNavigationDelegate, NSApplicationDelegate {
+final class ShellController: NSObject, WKNavigationDelegate, NSApplicationDelegate {
     private var window: NSWindow!
     private var webView: WKWebView!
     private var backend: Backend?
@@ -318,6 +337,14 @@ private final class ShellController: NSObject, WKNavigationDelegate, NSApplicati
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildWindow()
         boot()
+        // DSHX_AUTO_CHECK_UPDATE=1：启动 3 秒后自动跑一次「检查更新」。默认不开
+        // （每次启动白给一次网络请求；用户要的是手动点）。留它是为了拿假更新源
+        // 演练整条更新链路——平时碰不到更新，出事偏偏又最难查、最难复现。
+        if envString("DSHX_AUTO_CHECK_UPDATE") == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                UpdateController.shared.check()
+            }
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
@@ -541,6 +568,12 @@ private final class ShellController: NSObject, WKNavigationDelegate, NSApplicati
         boot()
     }
 
+    /// 插件市场窗口（market.swift）。目录数据面是 npm 的 dsh-bundle 生态，
+    /// 执行面与手敲 `dsh plugin add` 完全一致；安装成功后的重启从这里回来。
+    @objc func openMarket() {
+        MarketController.shared.show()
+    }
+
     /// WebKit 没有公开的「打开 Web Inspector」API；已开 developerExtrasEnabled，
     /// 页面里右键 → Inspect Element 可用。这里改为拷贝带 token 的后端地址。
     @objc func copyServerURL() {
@@ -570,25 +603,19 @@ private final class ShellController: NSObject, WKNavigationDelegate, NSApplicati
 
     // MARK: 上游更新
 
-    /// 只读地跑一次 update.sh check：在一个终端窗口里执行，让用户直接看结果。
-    /// 找不到 update.sh 时，退回到「把命令复制到剪贴板」，让用户粘到自己的终端。
+    /// 「检查更新」＝查 GitHub Releases 上有没有更新版的 dshX，然后弹窗让人决定。
+    /// 有新版时选「更新并重启」会下载 DMG、校验、换掉整个 .app 再重开（细节见
+    /// updater.swift）；这条链路不需要本机有源码或 npm。
     @objc func checkForUpdate() {
-        let version = currentDshVersion() ?? "未知"
-        guard let script = findUpdateScript() else {
-            presentManualFallback(
-                "没有检测到 update.sh",
-                "更新要在 App 外部跑（换 runtime/ 并重建 .app）。当前 dsh \(version)。"
-                + "把项目仓库里的 shell/update.sh 指给本 App 即可一键触发："
-                + "设环境变量 DSH_UPDATE_SCRIPT=/路径/update.sh，或用仓库工作目录启动 App。",
-                command: "cd <dsh-app>/shell && ./update.sh check")
-            return
-        }
-        shellLog("检查更新：bash \(script) check")
-        openInTerminal("bash '\(script)' check")
+        UpdateController.shared.check()
     }
 
-    /// 一键更新：在终端里跑 `update.sh update`。真正换后端无法由页面完成，必须
-    /// 在 App 外部执行；这里是把这条链路交给终端，用户在终端里确认与观察。
+    @objc func openReleasesPage() {
+        UpdateController.shared.openReleasesPage()
+    }
+
+    /// 开发机链路：在终端里跑 `update.sh update`，改的是仓库 runtime/ 里的
+    /// @deepseek-ai/dsh 并重打包。真正换后端无法由页面完成，必须在 App 外部执行。
     @objc func updateUpstream() {
         guard let script = findUpdateScript() else {
             presentManualFallback(
@@ -640,7 +667,7 @@ private func currentDshVersion() -> String? {
     return nil
 }
 
-private func envString(_ key: String) -> String? {
+func envString(_ key: String) -> String? {
     ProcessInfo.processInfo.environment[key]
 }
 
@@ -760,19 +787,27 @@ private func buildMainMenu() -> NSMenu {
     add(viewMenu, "拷贝后端地址（含 token）", #selector(ShellController.copyServerURL), "c", [.command, .shift])
     add(viewMenu, "在默认浏览器中打开", #selector(ShellController.openInBrowser), "b", [.command, .shift])
 
-    // 「更新」：跟踪上游 @deepseek-ai/dsh 版本。真正的更新必须在 App 外部做
-    // （换 runtime/ + 重建 .app），所以这里把链路交给终端跑 update.sh；脚本会
-    // 自己判断有没有新版、要不要装。找不到脚本时，菜单动作退回「复制命令」。
+    // 「更新」有两条链路，别混：
+    //   1. 检查更新…：查 GitHub Releases（dshX 仓库）有没有更新版的 App，弹窗选
+    //      「更新并重启 / 取消」。装好的 App 走这条，不需要源码与 npm。
+    //   2. 更新后端 dsh…：开发机链路，打开终端跑仓库里的 update.sh，改 runtime/
+    //      里的 @deepseek-ai/dsh 再重打包。找不到脚本时退回「复制命令」。
     let updateMenu = addSection("更新", to: menu)
-    if let version = currentDshVersion() {
-        let info = updateMenu.addItem(withTitle: "当前 dsh：\(version)", action: nil, keyEquivalent: "")
-        info.isEnabled = false
-        updateMenu.addItem(.separator())
-    }
-    add(updateMenu, "检查更新…", #selector(ShellController.checkForUpdate), "u")
-    add(updateMenu, "更新并重建（终端）…", #selector(ShellController.updateUpstream), "u", [.command, .shift])
+    let currentLine = "当前 dshX \(currentAppVersion()) · 后端 dsh \(currentDshVersion() ?? "未知")"
+    let info = updateMenu.addItem(withTitle: currentLine, action: nil, keyEquivalent: "")
+    info.isEnabled = false
     updateMenu.addItem(.separator())
+    add(updateMenu, "检查更新…", #selector(ShellController.checkForUpdate), "u")
+    add(updateMenu, "在浏览器里打开 Releases 页", #selector(ShellController.openReleasesPage), "")
+    updateMenu.addItem(.separator())
+    add(updateMenu, "更新后端 dsh（终端跑 update.sh）…",
+        #selector(ShellController.updateUpstream), "u", [.command, .shift])
     add(updateMenu, "拷贝更新命令", #selector(ShellController.copyUpdateCommand), "")
+
+    // 「插件」：dsh 的插件分发面就是 npm（上游约定的标记是 `dsh-plugin`），安装链路
+    // 与手敲 `dsh plugin add` 完全一致，数据源与细节见 market.swift。
+    let pluginMenu = addSection("插件", to: menu)
+    add(pluginMenu, "插件市场…", #selector(ShellController.openMarket), "p", [.command, .shift])
 
     let windowMenu = addSection("窗口", to: menu)
     add(windowMenu, "最小化", #selector(NSWindow.performMiniaturize(_:)), "m")

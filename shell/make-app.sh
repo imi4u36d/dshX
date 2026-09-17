@@ -6,7 +6,7 @@
 #                            校验签名，都过了才删掉 build 里的产物（省那 400M 双份）
 #
 # 可覆盖的环境变量：
-#   VERSION     写进 Info.plist 的 CFBundleShortVersionString/CFBundleVersion（默认 0.1.0）
+#   VERSION     写进 Info.plist 的 CFBundleShortVersionString/CFBundleVersion（默认 0.2.0）
 #   NODE_ARCH   内置 Node 的架构（默认取本机 uname -m，即与壳同架构）
 #   NODE_VERSION / ICNS / RUNTIME  见下面各默认值
 #   DEPLOY_TARGET 编译目标的最低 macOS（默认 12.0；别拿掉，否则 -10825）
@@ -29,7 +29,7 @@ APP="$BUILD/dshX.app"
 APP_NAME="dshX"
 BUNDLE_ID="local.dshx.shell"
 ICNS="${ICNS:-$ROOT/iconsrc/official.icns}"
-VERSION="${VERSION:-0.1.0}"
+VERSION="${VERSION:-0.2.0}"
 NODE_VERSION="${NODE_VERSION:-24.17.0}"
 # 内置的 Node 必须和壳同架构：Intel 上装 arm64 的 node 会直接跑不起来。
 NODE_ARCH="${NODE_ARCH:-$(uname -m)}"
@@ -54,7 +54,8 @@ TMPDIR="$ROOT/.tmp" xcrun swiftc -swift-version 5 -O \
   -target "${NODE_ARCH}-apple-macosx${DEPLOY_TARGET}" \
   -module-cache-path "$ROOT/.modulecache" \
   -framework AppKit -framework WebKit \
-  "$SHELL_DIR/Sources/main.swift" -o "$APP/Contents/MacOS/$APP_NAME"
+  "$SHELL_DIR/Sources/main.swift" "$SHELL_DIR/Sources/market.swift" \
+  "$SHELL_DIR/Sources/updater.swift" -o "$APP/Contents/MacOS/$APP_NAME"
 
 # 编译成功不代表能启动：minos 一旦高于用户系统，双击只会得 -10825。
 MINOS="$(otool -l "$APP/Contents/MacOS/$APP_NAME" 2>/dev/null | awk '/minos/{print $2; exit}')"
@@ -78,6 +79,49 @@ fi
 say "拷入 dsh 运行时（ditto 保留权限与签名）"
 ditto "$RUNTIME/node_modules" "$APP/Contents/Resources/runtime/node_modules"
 cp "$RUNTIME/package.json" "$APP/Contents/Resources/runtime/package.json"
+
+# 插件安装链路 = dsh CLI 的 plugin 子命令 + pnpm（CLI 在 profile 目录里 execvp
+# 找名为 pnpm 的可执行）。这里把 pnpm 打进 .app：子进程 PATH 会前置
+# Contents/Resources/tools/bin，那里放一个名为 pnpm 的包装脚本。
+# 默认钉 10.20.0：tgz 自带纯 JS CLI（pnpm.cjs），随内置 Node 直接跑，
+# 不像 12.x 那样首跑还要再联网下载原生二进制。
+PNPM_VERSION="${PNPM_VERSION:-10.20.0}"
+PNPM_SHA256="${PNPM_SHA256:-47a3352808501b8d1ef20112273b6a5dcfa53d28a55bcce36d268e878bd6bfe9}"
+PNPM_TGZ="pnpm-${PNPM_VERSION}.tgz"
+
+say "准备内置 pnpm v${PNPM_VERSION}（插件安装转发目标）"
+PNPM_DIR="$APP/Contents/Resources/tools/pnpm"
+mkdir -p "$PNPM_DIR" "$APP/Contents/Resources/tools/bin"
+if [[ ! -f "$CACHE/$PNPM_TGZ" ]]; then
+  curl -fsSL -o "$CACHE/$PNPM_TGZ.part" "https://registry.npmjs.org/pnpm/-/$PNPM_TGZ"
+  mv "$CACHE/$PNPM_TGZ.part" "$CACHE/$PNPM_TGZ"
+fi
+PNPM_ACTUAL="$(shasum -a 256 "$CACHE/$PNPM_TGZ" | awk '{print $1}')"
+if [[ "$PNPM_ACTUAL" != "$PNPM_SHA256" ]]; then
+  echo "pnpm 归档校验失败（期望 ${PNPM_SHA256}，实际 ${PNPM_ACTUAL}）" >&2
+  echo "  版本真要升级时，同步改 PNPM_VERSION 与 PNPM_SHA256（或用同名环境变量覆盖）。" >&2
+  exit 1
+fi
+tar xzf "$CACHE/$PNPM_TGZ" -C "$PNPM_DIR"
+cat > "$APP/Contents/Resources/tools/bin/pnpm" <<'SH'
+#!/bin/sh
+# dshX：dsh 安装插件时 execvp('pnpm') 按 PATH 找的就是这个文件名。
+DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+exec node "$DIR/../pnpm/package/bin/pnpm.cjs" "$@"
+SH
+chmod +x "$APP/Contents/Resources/tools/bin/pnpm"
+# 市场目录：默认打包进 .app；运行时可被 DSH_PLUGIN_CATALOG 指向的本地文件覆盖。
+if [[ -f "$SHELL_DIR/Resources/catalog.json" ]]; then
+  cp "$SHELL_DIR/Resources/catalog.json" "$APP/Contents/Resources/catalog.json"
+fi
+
+say "拷入换包脚本（「检查更新」用）"
+# 「换包」这一步没法在 App 里做（后端正跑在被替换的那份包里），由 App 退出后
+# 拉起的这个脚本接手。打进 .app；源码方式跑壳时也会从工作目录找同一份，
+# 顺序见 Sources/updater.swift 里的 findApplyScript。
+mkdir -p "$APP/Contents/Resources/updater"
+cp "$SHELL_DIR/updater/apply-update.sh" "$APP/Contents/Resources/updater/apply-update.sh"
+chmod +x "$APP/Contents/Resources/updater/apply-update.sh"
 
 say "准备内置 Node v${NODE_VERSION}（${NODE_ARCH} 官方 tarball，校验 SHA-256）"
 mkdir -p "$CACHE"
