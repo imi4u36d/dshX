@@ -3,7 +3,7 @@
 #
 #   ./make-dmg.sh                     # build/dshX.app → build/dshX-<版本>-<架构>.dmg
 #   APP=/path/别的.app ./make-dmg.sh  # 换源
-#   VERSION=0.2.0 ./make-dmg.sh       # 覆盖文件名与卷标里的版本号
+#   VERSION=0.2.2 ./make-dmg.sh       # 覆盖文件名与卷标里的版本号
 #   OUT_DIR=dist ./make-dmg.sh        # 换输出目录
 #
 # 产物旁边会留一个 .dmg.sha256；CI 把两者一起传上去。

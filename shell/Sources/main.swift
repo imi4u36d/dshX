@@ -16,6 +16,9 @@ import WebKit
    - DSH_HOME 默认落在 Application Support 下的私有目录，不去抢默认的 ~/.dsh
      （那里可能正被另一个 harness 实例独占）。
    - 导航只留在回环地址内；外部链接交给系统默认浏览器。
+   - 外观上是原生 App 不是浏览器：右键菜单只留文本编辑那几项（检查元素 / 翻译 /
+     查询 / 搜索 / 分享 / 朗读这些一律不出），标题栏（红绿灯那一条）跟着页面主题
+     走，不在顶上留一条异色。细节见下面「原生外观」一节。
  */
 
 let appTitle = "dshX"
@@ -61,6 +64,146 @@ private let fixedShellGuardScript = """
   document.addEventListener('DOMContentLoaded', inject);
 })();
 """
+
+// MARK: - 原生外观：右键菜单与标题栏
+//
+// 两件「像网页」的事在这里收掉：
+//   1. 右键菜单。WebKit 会奉上一整套浏览器菜单——检查元素、翻译、查询、用某引擎
+//      搜索、分享、朗读、重新载入……这个壳是原生 App，只该留文本编辑那几项。
+//   2. 标题栏。红绿灯那一条默认是系统材质色，浮在深色/浅色页面顶上就是一条接缝。
+//      把标题栏做成透明、再让窗口背景色跟着页面底色走，两者同色。
+//
+// 页面主题由它自己的 ui-theme 设置决定（light / dark / system），跟系统外观不一定
+// 一致，所以底色得由页面报上来（见 themeBridgeScript）。刻意不动 window.appearance：
+// 页面里的 `prefers-color-scheme` 取的就是这个视图的外观，一动它就等于改了页面
+// 「跟随系统」的解析结果，会把 ui-theme 的 system 卡死在我们设的那一档。
+//
+// 排查开关：
+//   DSHX_ALLOW_WEB_MENU=1          恢复网页全套右键菜单，并打开 developerExtrasEnabled
+//                                  与 isInspectable（要用 Web Inspector 就靠它）
+//   DSHX_CAPTURE_WINDOW=<png 路径> 页面载入后把窗口自身抓一张图；进程内抓自己的
+//                                  窗口不需要「屏幕录制」权限，核对标题栏配色用它
+private let webContextMenuAllowed = ProcessInfo.processInfo.environment["DSHX_ALLOW_WEB_MENU"] == "1"
+
+/// 页面回报主题用的消息名：注入脚本与 WKScriptMessageHandler 必须一致。
+private let themeMessageName = "dshxTheme"
+
+/// 过滤后允许留在右键菜单里的标题。
+/// WebKit 的条目**全部**共用 `forwardContextMenuAction:`（实测 "Reload"、"Inspect
+/// Element"、"Cut"、"Translate" 都是这一个 selector），按 selector 根本分不出谁是谁，
+/// 只能按标题认；而标题会跟系统语言变（同一台机器上中英混着来），所以中英两套都列，
+/// 认不出来的一律丢掉——将来系统加了什么新条目也不会漏出来。留下的都是原生文本编辑动作。
+private let nativeEditMenuTitles: Set<String> = [
+    "cut", "copy", "paste", "delete", "select all", "paste and match style",
+    "剪切", "拷贝", "复制", "粘贴", "删除", "全选", "粘贴并匹配样式",
+]
+
+/// 右键落在「能编辑或已有选区」的地方才让 WebKit 弹它自己的菜单，其余一律取消。
+/// WebKit 只在页面没取消 contextmenu 时才弹原生菜单，所以这一下就把链接 / 图片 /
+/// 空白处的浏览器菜单挡在门外，也就不会出现「白名单筛完一项不剩」的空菜单盒子。
+/// 页面自己的右键菜单不受影响：ui-primitives 那几个 onContextMenu 本来就 preventDefault
+/// 之后自己弹 UI（JsonTree 的拷贝菜单、dockkit 的页签菜单），取消默认动作不影响它们。
+private let contextMenuGuardScript = """
+(function () {
+  function editable(event) {
+    var path = (event.composedPath && event.composedPath()) || [event.target];
+    for (var i = 0; i < path.length; i++) {
+      var node = path[i];
+      if (!node || node.nodeType !== 1) { continue; }
+      var tag = (node.tagName || '').toUpperCase();
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') { return true; }
+      if (node.isContentEditable) { return true; }
+    }
+    return false;
+  }
+  function hasSelection() {
+    try {
+      var selection = window.getSelection();
+      return !!(selection && !selection.isCollapsed && String(selection).length > 0);
+    } catch (error) { return false; }
+  }
+  window.addEventListener('contextmenu', function (event) {
+    if (editable(event) || hasSelection()) { return; }
+    event.preventDefault();
+  }, true);
+})();
+"""
+
+/// 页面主题 → 原生窗口的消息。页面那边 ui-theme 会把主题投影到 DOM 上：
+/// `html { color-scheme }`、`body[data-ds-dark-theme]`、body 内联的主题 token，
+/// 另外 ThemePresenter 还会维护一个 `meta[name="theme-color"]`（内容就是它算出来的
+/// body 底色）。这里优先读那个 meta，其次自己算 body 底色，最后退到 `--dsw-alias-bg-base`；
+/// 都读不到就报空串，原生侧会忽略这一次（窗口底色保持不动）。主题变化（切 light/dark/system、
+/// 跟着系统变）靠 MutationObserver + matchMedia 监听重报。
+private let themeBridgeScript = """
+(function () {
+  var name = '\(themeMessageName)';
+  function readBackground() {
+    var meta = document.querySelector('meta[name="theme-color"]');
+    if (meta && meta.content) { return meta.content; }
+    var body = document.body;
+    if (!body) { return ''; }
+    var computed = getComputedStyle(body);
+    var color = computed.backgroundColor;
+    if (!color || color === 'rgba(0, 0, 0, 0)' || color === 'transparent') {
+      color = (computed.getPropertyValue('--dsw-alias-bg-base') || '').trim();
+    }
+    return color || '';
+  }
+  function report() {
+    var root = document.documentElement;
+    var scheme = root && root.style ? root.style.colorScheme : '';
+    var dark = scheme
+      ? scheme === 'dark'
+      : !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+    try {
+      window.webkit.messageHandlers[name].postMessage({ dark: dark, background: readBackground() });
+    } catch (error) { /* 原生侧还没就绪；后面 DOMContentLoaded / load 还会再报 */ }
+  }
+  report();
+  document.addEventListener('DOMContentLoaded', report);
+  window.addEventListener('load', report);
+  var media = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+  if (media && media.addEventListener) { media.addEventListener('change', report); }
+  if (window.MutationObserver) {
+    new MutationObserver(report)
+      .observe(document.documentElement, { attributes: true, attributeFilter: ['style'] });
+    document.addEventListener('DOMContentLoaded', function () {
+      if (!document.body) { return; }
+      new MutationObserver(report)
+        .observe(document.body, { attributes: true, attributeFilter: ['style', 'data-ds-dark-theme'] });
+      report();
+    });
+  }
+})();
+"""
+
+/// 启动页底色。HTML 与窗口标题栏共用一份：`loadHTMLString` 载入的启动页拿不到
+/// 主题桥（WKUserScript 不进这种载入），标题栏只能由壳自己按这个色设，不然后端
+/// 起来前那几十秒顶上还是一条系统材质色压在深色启动页上——同一个接缝，只是时间短。
+private let bootPageBackgroundCSS = "#111418"
+private let bootPageBackground = NSColor(srgbRed: 17 / 255, green: 20 / 255,
+                                         blue: 24 / 255, alpha: 1)
+
+/// 解析页面回报的 CSS 颜色（`rgb()` / `rgba()` / `#rrggbb`）。
+/// 全透明（alpha≈0）按「没报」处理，交给调用方兜底。
+func parseCSSColor(_ text: String) -> NSColor? {
+    let value = text.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if value.hasPrefix("#") {
+        var hex = String(value.dropFirst())
+        if hex.count == 3 { hex = hex.map { "\($0)\($0)" }.joined() }
+        guard hex.count >= 6, let number = UInt32(hex.prefix(6), radix: 16) else { return nil }
+        return NSColor(srgbRed: CGFloat((number >> 16) & 0xff) / 255,
+                       green: CGFloat((number >> 8) & 0xff) / 255,
+                       blue: CGFloat(number & 0xff) / 255, alpha: 1)
+    }
+    let numbers = value.split(whereSeparator: { !"0123456789.".contains($0) }).compactMap { Double($0) }
+    guard numbers.count >= 3 else { return nil }
+    let alpha = numbers.count >= 4 ? numbers[3] : 1
+    guard alpha > 0.01 else { return nil }
+    return NSColor(srgbRed: CGFloat(numbers[0] / 255), green: CGFloat(numbers[1] / 255),
+                   blue: CGFloat(numbers[2] / 255), alpha: 1)
+}
 
 // MARK: - 运行资源解析
 
@@ -298,24 +441,59 @@ private func installShutdownSignalNet() {
     }
 }
 
+/// 往日志文件追加一段。**每条都先 seek 到末尾**：`FileHandle(forWritingTo:)` 的游标
+/// 停在 0，不挪就是从文件头开始覆盖，把先前的日志（连后端的输出一起）整段冲掉——
+/// 「检查更新」到底查到什么，原本就是这么查不到的。这个坑当初只修了 `shellLog`，
+/// 后端那两条管道（stdout/stderr 各一个 readabilityHandler，各在自己的线程上写同一个
+/// handle）还在冲掉文件开头：一次启动的 header 会盖住上一次的记录。锁 + 每条 seek
+/// 一起上，才算把「日志是追加的」这件事做对。
+private let logWriteLock = NSLock()
+
 private func writeLine(_ handle: FileHandle?, _ text: String) {
     guard let handle, let data = text.data(using: .utf8) else { return }
+    logWriteLock.lock()
+    defer { logWriteLock.unlock() }
+    try? handle.seekToEnd()
     try? handle.write(contentsOf: data)
 }
 
 /// 壳自己那一侧的诊断日志（后端原始输出也写同一个文件）。
-///
-/// 必须先 seek 到末尾：`FileHandle(forWritingTo:)` 的游标停在 0，不挪就是从文件头
-/// 开始覆盖，把先前的日志（连后端的输出一起）整段冲掉——「检查更新」到底查到什么，
-/// 原本就是这么查不到的。
 func shellLog(_ text: String) {
     guard let handle = try? FileHandle(forWritingTo: logFileURL) else { return }
     defer { try? handle.close() }
-    do {
-        try handle.seekToEnd()
-        try handle.write(contentsOf: Data("[shell] \(text)\n".utf8))
-    } catch {
-        // 日志写不进去就算了，不该影响主流程。
+    writeLine(handle, "[shell] \(text)\n")
+}
+
+// MARK: - 原生外观（WebView / 主题桥）
+
+/// 只承载页面的 WKWebView：把网页式右键菜单拦在原生这一侧。
+final class ShellWebView: WKWebView {
+    /// WebKit 弹菜单前会走这里：先跑 `super`（别打断它自己的记账），再把菜单重排成白名单。
+    override func willOpenMenu(_ menu: NSMenu, with event: NSEvent) {
+        super.willOpenMenu(menu, with: event)
+        guard !webContextMenuAllowed else { return }
+        let keep = menu.items.filter { item in
+            !item.isSeparatorItem
+                && nativeEditMenuTitles.contains(item.title.trimmingCharacters(in: .whitespaces).lowercased())
+        }
+        // 整个清空、再按原顺序放回：分隔线一起丢掉（删剩下的分隔线还会撑出一格空段）。
+        // 既不能编辑又没有选区时，注入脚本已经不让 WebKit 弹菜单了，所以这里不会
+        // 出现「一项都不剩」的空盒子；真剩 0 项也照旧清空——宁可没有菜单，也不给网页菜单。
+        menu.removeAllItems()
+        for item in keep { menu.addItem(item) }
+    }
+}
+
+/// 页面主题 → 窗口外观。单独一个类：WKUserContentController 会强引用 handler，
+/// 让它直接持 ShellController 就成了循环引用。
+final class ThemeBridge: NSObject, WKScriptMessageHandler {
+    weak var controller: ShellController?
+
+    func userContentController(_ controller: WKUserContentController,
+                               didReceive message: WKScriptMessage) {
+        guard let payload = message.body as? [String: Any] else { return }
+        self.controller?.applyPageTheme(dark: payload["dark"] as? Bool ?? false,
+                                        background: payload["background"] as? String)
     }
 }
 
@@ -323,12 +501,16 @@ func shellLog(_ text: String) {
 
 final class ShellController: NSObject, WKNavigationDelegate, NSApplicationDelegate {
     private var window: NSWindow!
-    private var webView: WKWebView!
+    private var webView: ShellWebView!
     private var backend: Backend?
     private var currentURL: URL?
     private var navigationRetries = 0
     private var workspaceOverride: String?
     private var isShuttingDown = false
+    /// 上一次页面报上来的底色，用来避免同一档主题重复写日志。
+    private var lastReportedBackground: String?
+    /// DSHX_CAPTURE_WINDOW 只抓一次。
+    private var capturedWindow = false
 
     static let shared = ShellController()
 
@@ -462,23 +644,45 @@ final class ShellController: NSObject, WKNavigationDelegate, NSApplicationDelega
         // 「窗口变小」其实是台前调度（Stage Manager）左侧缩略图的几何，被
         // CGWindowListCopyWindowInfo 当成了窗口尺寸。这里只是顺手收紧尺寸约束。
         window.contentMinSize = NSSize(width: 720, height: 480)
+        // 标题栏透明：那一条底色就由窗口背景色决定，而背景色跟着页面底色走
+        // （见 applyPageTheme）。不隐藏标题文字的话，「dshX — 127.0.0.1:端口」
+        // 会直接压在页面顶部的内容上。刻意不加 .fullSizeContentView：那会让
+        // 页面顶到红绿灯底下（侧栏第一行控件正好在左上角），得反过来给页面让位。
+        window.titlebarAppearsTransparent = true
+        window.titleVisibility = .hidden
         window.center()
 
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
-        configuration.preferences.setValue(true, forKey: "developerExtrasEnabled")
+        // 「开发者附加功能」默认关：它就是右键里那项 Inspect Element 的来源
+        // （实测关掉后 WebKit 自己就不再往菜单里加这一项），isInspectable 同理。
+        // 要用 Web Inspector 排查页面时给 DSHX_ALLOW_WEB_MENU=1。
+        configuration.preferences.setValue(webContextMenuAllowed, forKey: "developerExtrasEnabled")
+        let contentController = configuration.userContentController
+        contentController.addUserScript(WKUserScript(source: themeBridgeScript,
+                                                     injectionTime: .atDocumentStart,
+                                                     forMainFrameOnly: true))
+        if !webContextMenuAllowed {
+            // 子框架也要注入：菜单是每个框架各弹各的，漏了 iframe 就等于漏了菜单。
+            contentController.addUserScript(WKUserScript(source: contextMenuGuardScript,
+                                                         injectionTime: .atDocumentStart,
+                                                         forMainFrameOnly: false))
+        }
+        let bridge = ThemeBridge()
+        bridge.controller = self
+        contentController.add(bridge, name: themeMessageName)
         if !pageScrollAllowed {
-            configuration.userContentController.addUserScript(WKUserScript(
+            contentController.addUserScript(WKUserScript(
                 source: fixedShellGuardScript,
                 injectionTime: .atDocumentStart,
                 forMainFrameOnly: true))
         }
-        let webView = WKWebView(frame: frame, configuration: configuration)
+        let webView = ShellWebView(frame: frame, configuration: configuration)
         webView.navigationDelegate = self
         webView.allowsBackForwardNavigationGestures = false
         // 默认关：放大后整页可四下拖动，就是「整个 App 能滚」的那个现象。
         webView.allowsMagnification = pinchZoomEnabled
-        if #available(macOS 13.3, *) { webView.isInspectable = true }
+        if #available(macOS 13.3, *) { webView.isInspectable = webContextMenuAllowed }
         self.webView = webView
 
         window.contentView = webView
@@ -487,10 +691,12 @@ final class ShellController: NSObject, WKNavigationDelegate, NSApplicationDelega
     }
 
     private func presentBootPage(_ detail: String) {
+        // 标题栏是透明的，先把窗口背景设成启动页那个色，顶上才不会有第二条色。
+        window.backgroundColor = bootPageBackground
         let html = """
         <!doctype html><meta charset="utf-8"><meta name="color-scheme" content="dark light">
         <style>
-          body{margin:0;height:100vh;display:grid;place-items:center;background:#111418;color:#c9d1d9;
+          body{margin:0;height:100vh;display:grid;place-items:center;background:\(bootPageBackgroundCSS);color:#c9d1d9;
                font:13px/1.8 ui-monospace,SFMono-Regular,Menlo,monospace}
           .card{max-width:46rem;padding:1.6rem 1.9rem;border:1px solid #2b3138;border-radius:10px;background:#171b21}
           h1{font:600 14px/1.4 -apple-system,system-ui,sans-serif;margin:0 0 .9rem}
@@ -532,6 +738,51 @@ final class ShellController: NSObject, WKNavigationDelegate, NSApplicationDelega
 
     func webView(_ view: WKWebView, didFinish navigation: WKNavigation!) {
         shellLog("页面载入完成：\(view.url?.absoluteString ?? "")")
+        captureWindowIfRequested()
+    }
+
+    // MARK: 原生外观
+
+    /// 页面报上来的主题：标题栏是透明的，透出来的就是窗口背景色，所以两者必须同色。
+    ///
+    /// 只改背景色，不动 `window.appearance`：页面里 `prefers-color-scheme` 取的就是
+    /// 这个视图的外观，一改就等于替页面把「跟随系统」解析成了我们设的那一档，
+    /// ui-theme 的 system 会卡住。系统材质色（菜单、弹窗）继续跟系统，页面自己一套，
+    /// 这是有意的取舍。
+    func applyPageTheme(dark: Bool, background: String?) {
+        // 页面还没报出底色（documentStart 时 body 还没建）就什么都不做：这里若退回
+        // 系统窗口底色，「深色启动页 → 真页面」之间会在标题栏闪一下浅色。
+        guard let background, let color = parseCSSColor(background) else { return }
+        if window.backgroundColor != color { window.backgroundColor = color }
+        guard background != lastReportedBackground else { return }
+        lastReportedBackground = background
+        shellLog("页面主题：\(dark ? "dark" : "light")，标题栏底色 \(background)")
+    }
+
+    /// DSHX_CAPTURE_WINDOW=<png 路径>：页面载入后把窗口自身抓一张图，只抓一次。
+    /// 进程内抓自己的窗口不需要「屏幕录制」权限（抓别的窗口才需要），核标题栏
+    /// 那条底色有没有跟页面一致就靠它。启动页（后端还没就绪）不算，等真页面。
+    private func captureWindowIfRequested() {
+        guard !capturedWindow, currentURL != nil,
+              let path = envString("DSHX_CAPTURE_WINDOW"), !path.isEmpty else { return }
+        capturedWindow = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self else { return }
+            guard let image = CGWindowListCreateImage(.null, .optionIncludingWindow,
+                                                      CGWindowID(self.window.windowNumber),
+                                                      [.boundsIgnoreFraming]),
+                  let data = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])
+            else {
+                shellLog("窗口截图失败：\(path)")
+                return
+            }
+            do {
+                try data.write(to: URL(fileURLWithPath: path))
+                shellLog("窗口截图已写出：\(path)")
+            } catch {
+                shellLog("窗口截图写不出去：\(error.localizedDescription)")
+            }
+        }
     }
 
     /// 载入失败不静默：重试三次，仍失败就把话说清楚并给出出口。
@@ -568,8 +819,9 @@ final class ShellController: NSObject, WKNavigationDelegate, NSApplicationDelega
         boot()
     }
 
-    /// WebKit 没有公开的「打开 Web Inspector」API；已开 developerExtrasEnabled，
-    /// 页面里右键 → Inspect Element 可用。这里改为拷贝带 token 的后端地址。
+    /// WebKit 没有公开的「打开 Web Inspector」API，本壳默认也没开开发者附加功能
+    /// （页面里右键那项 Inspect Element 已经不出）；临时要排查页面就给
+    /// DSHX_ALLOW_WEB_MENU=1。这里留给菜单的动作是拷贝带 token 的后端地址。
     @objc func copyServerURL() {
         guard let url = currentURL else { return }
         NSPasteboard.general.clearContents()

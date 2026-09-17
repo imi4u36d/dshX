@@ -41,7 +41,7 @@
 4. 想要校验完整性，把 `.dmg` 和同名 `.sha256` 放在同一目录：
 
    ```sh
-   shasum -a 256 -c dshX-0.2.0-arm64.dmg.sha256
+   shasum -a 256 -c dshX-0.2.2-arm64.dmg.sha256
    ```
 
 **系统要求**：macOS 12+、Apple Silicon（arm64）。Intel 机器需要自己改
@@ -80,7 +80,7 @@ Node 并按 `SHASUMS256.txt` 校验 SHA-256 → 写图标与 `Info.plist` → ad
 
 | 变量 | 默认 | 说明 |
 | --- | --- | --- |
-| `VERSION` | `0.2.0` | 写进 `Info.plist` 的版本号，也进 DMG 文件名 |
+| `VERSION` | `0.2.2` | 写进 `Info.plist` 的版本号，也进 DMG 文件名 |
 | `NODE_ARCH` | `uname -m` | 内置 Node 的架构，必须与壳同架构 |
 | `DEPLOY_TARGET` | `12.0` | 壳的最低 macOS。别去掉：不带 `-target` 时 `minos` 会跟 SDK 走，比对方系统还新就启动不了（-10825） |
 | `NODE_VERSION` | `24.17.0` | 内置 Node 版本 |
@@ -95,7 +95,7 @@ Node 并按 `SHASUMS256.txt` 校验 SHA-256 → 写图标与 `Info.plist` → ad
 NODE_ARCH=x86_64 bash shell/make-app.sh
 
 # 例：换成自己的图标、临时换个版本号（默认版本见上表）
-VERSION=0.2.1 ICNS=~/my.icns bash shell/make-app.sh && bash shell/make-dmg.sh
+VERSION=0.2.3 ICNS=~/my.icns bash shell/make-app.sh && bash shell/make-dmg.sh
 ```
 
 更多细节（壳的行为约定、菜单快捷键、日志位置、卸载、踩过的坑）在
@@ -111,14 +111,13 @@ VERSION=0.2.1 ICNS=~/my.icns bash shell/make-app.sh && bash shell/make-dmg.sh
 | --- | --- |
 | 推 tag `v*` | 构建 + **创建 Release**，DMG 与 `.sha256` 作为附件 |
 | 网页 Actions › Build dmg › Run workflow | 只出 artifact（可填版本号） |
-| push 到 `main` | 只出 artifact，当作构建门禁 |
-| 改动 `shell/`、`iconsrc/`、`runtime/package*.json` 的 PR | 只出 artifact（**不会**发布） |
+| push 到 `main` / PR | **不触发**（日常提交不跑构建） |
 
 **发一个版本**：
 
 ```sh
-git tag v0.2.0
-git push origin v0.2.0        # 走完 CI 后 Release 就带好了 DMG
+git tag v0.2.2
+git push origin v0.2.2        # 走完 CI 后 Release 就带好了 DMG
 ```
 
 tag 重推也不会撞车：workflow 检测到同名 Release 已存在时改为覆盖上传附件。
@@ -126,7 +125,7 @@ tag 重推也不会撞车：workflow 检测到同名 Release 已存在时改为�
 **手动跑一次**（不发布，只拿 artifact）：
 
 ```sh
-gh workflow run release-dmg.yml -f version=0.2.0-test
+gh workflow run release-dmg.yml -f version=0.2.2-test
 ```
 
 几点说明：
@@ -230,6 +229,10 @@ bash shell/tools/update-check-test/rehearse-update.sh # 假更新源 + 假 App�
   **文件 › 选择工作目录并重启后端**（⌘O）、**查看 › 重启后端**（⌘⇧R）、
   拷贝后端地址（⌘⇧C）、在默认浏览器中打开（⌘⇧B）。
 - 整页不滚、不缩放（壳侧注入 CSS + 关掉缩放），内部滚动区照旧能滚。
+- 外观按原生 App 来，不按浏览器来：页面里右键只有文本编辑项（检查元素 / 翻译 /
+  查询 / 搜索 / 分享 / 朗读都不出；链接、图片、空白处连菜单都不弹），标题栏
+  （红绿灯那一条）跟着页面主题同色。要 Web Inspector 查页面得带
+  `DSHX_ALLOW_WEB_MENU=1` 启动，细节见 [`shell/README.md`](shell/README.md)。
 
 ## 已知限制
 

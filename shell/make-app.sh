@@ -6,7 +6,7 @@
 #                            校验签名，都过了才删掉 build 里的产物（省那 400M 双份）
 #
 # 可覆盖的环境变量：
-#   VERSION     写进 Info.plist 的 CFBundleShortVersionString/CFBundleVersion（默认 0.2.0）
+#   VERSION     写进 Info.plist 的 CFBundleShortVersionString/CFBundleVersion（默认 0.2.2）
 #   NODE_ARCH   内置 Node 的架构（默认取本机 uname -m，即与壳同架构）
 #   NODE_VERSION / ICNS / RUNTIME  见下面各默认值
 #   DEPLOY_TARGET 编译目标的最低 macOS（默认 12.0；别拿掉，否则 -10825）
@@ -29,7 +29,7 @@ APP="$BUILD/dshX.app"
 APP_NAME="dshX"
 BUNDLE_ID="local.dshx.shell"
 ICNS="${ICNS:-$ROOT/iconsrc/official.icns}"
-VERSION="${VERSION:-0.2.0}"
+VERSION="${VERSION:-0.2.2}"
 NODE_VERSION="${NODE_VERSION:-24.17.0}"
 # 内置的 Node 必须和壳同架构：Intel 上装 arm64 的 node 会直接跑不起来。
 NODE_ARCH="${NODE_ARCH:-$(uname -m)}"

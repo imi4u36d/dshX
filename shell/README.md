@@ -137,6 +137,28 @@ swift shell/tools/list-windows.swift   # 健在时窗口标题会带后端端口
   注入只钉文档层，内部滚动区（终端、代码块、面板）照旧能滚。
   调试开关：`DSHX_PINCH_ZOOM=1` 恢复双指缩放、`DSHX_ALLOW_PAGE_SCROLL=1`
   不注入样式（真出现某个页面必须靠整页滚动才能够到底时，用它验证是不是这条规则的锅）。
+- **外观按原生 App 做，不按浏览器做**，两件「像网页」的事都在壳这一侧收掉：
+  ① **右键菜单只留文本编辑那几项**。WebKit 默认会奉上一整套浏览器菜单——检查元素、
+  翻译、查询、用某引擎搜索、分享、朗读——这个壳是原生 App，不该有。做法是两段注入
+  脚本 + `WKWebView` 子类（`willOpenMenu` 按标题白名单重排）：右键落在**能编辑或已有
+  选区**的地方才让 WebKit 弹它自己的菜单，其余直接取消 contextmenu 的默认动作——
+  所以链接 / 图片 / 空白处连菜单都不弹，也就不会出现「白名单筛完一项不剩」的空菜单
+  盒子。页面自己的右键菜单（ui-primitives 那几个 `onContextMenu`）本来就 preventDefault
+  之后自己弹 UI，不受影响。
+  按标题认是因为 WebKit 的条目**全部**共用 `forwardContextMenuAction:`（实测 "Reload"、
+  "Inspect Element"、"Cut"、"Translate" 都是这一个 selector），selector 分不出谁是谁；
+  标题又跟系统语言走（同一台机器上中英混着来），所以中英两套都列，认不出来的一律丢掉。
+  ② **标题栏（红绿灯那一条）跟页面同色**：`titlebarAppearsTransparent` 之后那一条透出来
+  的就是窗口背景色，而页面会把自己的底色回报给壳（读 ui-theme 维护的
+  `meta[name="theme-color"]`，退到 body 底色、再退到 `--dsw-alias-bg-base`），壳据此设
+  `window.backgroundColor`，页面里切 light/dark/system 跟着变。启动页
+  （`loadHTMLString` 拿不到注入脚本）由壳按 `bootPageBackgroundCSS` 这个常量直接设。
+  刻意**不动** `window.appearance`：页面里 `prefers-color-scheme` 取的就是这个视图的外观，
+  一动就等于替页面把 `system` 档解析成我们设的明暗，会把 ui-theme 卡住。
+  调试开关：`DSHX_ALLOW_WEB_MENU=1` 恢复网页全套右键菜单，并打开
+  `developerExtrasEnabled` / `isInspectable`（要用 Web Inspector 查页面就靠它，默认关）；
+  `DSHX_CAPTURE_WINDOW=<png 路径>` 在页面载入后把窗口自身抓一张图——进程内抓自己的
+  窗口不需要「屏幕录制」权限，核标题栏配色用它。
 - 子进程环境**剔除全部 `DSH_*` 变量**再重设 `DSH_HOME`，避免继承别的 harness
   会话状态（`DSH_SHELL` / `DSH_SESSION_ID` / `DSH_WEB_URL` 这些会被误认）。
 - `DSH_HOME` 默认 `~/Library/Application Support/dshX/home`，**不动 `~/.dsh`**
@@ -148,8 +170,9 @@ swift shell/tools/list-windows.swift   # 健在时窗口标题会带后端端口
 - 菜单：**dshX › 检查更新…**（⌘U，紧挨「关于 dshX」，见「更新」一节）、
   **文件 › 选择工作目录并重启后端**（⌘O）、**查看 › 重启后端**（⌘⇧R）、
   拷贝后端地址（⌘⇧C，含 token，可粘给浏览器）、在默认浏览器中打开（⌘⇧B）。
-  调试用：页面里右键 › Inspect Element（developerExtrasEnabled 已开；WebKit 没有
-  公开的「打开 Web Inspector」API）。
+  页面里的右键菜单见上面那条：默认只有文本编辑项；要用 Web Inspector 就带
+  `DSHX_ALLOW_WEB_MENU=1` 启动（WebKit 没有公开的「打开 Web Inspector」API，
+  靠的就是这个开关把 `developerExtrasEnabled` 打开、右键里那项 Inspect Element 回来）。
 
 ## 更新
 
@@ -158,6 +181,11 @@ dshX 只是壳，**真正跑的后端也打包在 `.app` 里**
 **dshX › 检查更新…** 换的是**整个 .app**（后端跟着一起换）；改**仓库里的 `runtime/`
 再重建**是开发机链路，走命令行 `update.sh`，已经不在菜单里。共同的前提：换包不能在
 App 内部完成——页面正跑在被替换的那份后端上，所以两条路都把动作放到 App 外面。
+
+> **本地改了壳、又要装到本机的人注意**：`make-app.sh` 的 `VERSION` 默认跟着最近一次
+> Release（现在是 0.2.2）。你在发版之后又动了壳、想留住本机这一份，构建时把版本抬到
+> **不低于**最新 Release（`VERSION=0.2.3 ./make-app.sh`）——低一档的话，点一次
+> **检查更新…** 就会拿源上那个包把你的改动整包换掉（换包换的是**整个 .app**，不留情面）。
 
 ### 检查更新…（⌘U）＝ 换整个 App（装好的人用这条）
 
@@ -275,10 +303,24 @@ bash install-app.sh --launch     # 3) 想常驻：先退出已装的 dshX，再�
   icns）也是 5.17 / 73.84；无自定义图标的对照（/etc/hosts）是 0.00。
   残留的 5.17 是 macOS 26 把图标塞进 "icon island" 容器时的边缘/圆角合成。
 - 怎么确认「整页不滚」生效：重建装好后，滚到终端输出或长代码块的底部再继续滚，
-  页面整体不该位移；右键 › Inspect Element 里跑
+  页面整体不该位移；带 `DSHX_ALLOW_WEB_MENU=1` 启动（默认没有 Inspect Element 了），
+  在 Web Inspector 里跑
   `getComputedStyle(document.body).overflow` 应返回 `hidden`，
   `document.scrollingElement.scrollHeight === document.scrollingElement.clientHeight`
   说明文档层没有剩余滚动量。
+- 右键菜单 / 标题栏验过的（做法：写了个一次性探针，把壳的窗口配置与那两段注入脚本
+  原样搬到真实页面上跑，再抓窗口图量像素）：
+  - 非编辑、无选区处右键，连 `willOpenMenu` 都不进（守卫生效，压根不弹菜单）；
+  - 真实输入区 WebKit 原始 11 项（Cut / Copy / Paste / Spelling and Grammar /
+    Substitutions / Font / Speech / Paragraph Direction …）过滤后只剩
+    **Cut / Copy / Paste**；关掉 `developerExtrasEnabled` 后 WebKit 自己就不再给
+    Inspect Element（原始 15 项 → 13 项）；
+  - 抓下来的窗口图里，标题栏 `y=4` 与页面顶 `y=70` 都是 `rgb(255,255,255)`
+    （改之前标题栏是系统材质色，跟纯白页面差一档）。启动页那条按
+    `bootPageBackgroundCSS` 同理，只是短时间看不出来。
+  - 想自己复核：`DSHX_CAPTURE_WINDOW=<png> "/Applications/dshX.app/Contents/MacOS/dshX"`
+    ——**直接跑包里的可执行文件**，环境变量才会带进去（`open` 不带，实测 `open --env`
+    在这台机器上也没把变量传进去）。
 - 曾经踩到的两个真问题（都已修，留个记录）:
   1. ATS 把 `http://127.0.0.1` 拦成「需要安全连接」。只有
      `NSAllowsArbitraryLoads` 不够，WKWebView 的网页内容读
@@ -300,7 +342,9 @@ bash install-app.sh --launch     # 3) 想常驻：先退出已装的 dshX，再�
      才会走到那行）。凡是变量后面要跟中文标点，一律写 `${VAR}`。
   2. **`shellLog` 用 `FileHandle(forWritingTo:)` 但不 `seekToEnd`**，于是每条日志
      都从文件第 0 字节开始覆盖，把前面的（连后端输出一起）冲掉。查更新结果时
-     满屏找不到，才把它揪出来。
+     满屏找不到，才把它揪出来。当时只修了 `shellLog`，后端那两条管道（stdout/stderr
+     各一个 readabilityHandler）还在冲——后来把 seek 挪进 `writeLine`（外加一把锁把
+     两条管道串起来），「每条都追加」才真的成立。
 - `kill -9` 壳之后，后端与看门狗都会自行退出（这是三条退出路径里唯一
   能自动化验证的一条；⌘Q 路径只有代码保证，Apple Events 被权限拦了）。
 
