@@ -518,6 +518,33 @@ final class ShellController: NSObject, WKNavigationDelegate, NSApplicationDelega
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         buildWindow()
+        // 启动前先把「另一个后端共用同一个 DSH_HOME」处理掉：它会占住会话写锁，
+        // 模型切换会报「当前会话已被占用」，换 runtime 时还可能踩到正 mmap 的旧文件。
+        guard resolveBackendConflictsOrExit() else {
+            NSApp.terminate(nil)
+            return
+        }
+        // 「更新 dsh 后端…」要能在不退出 App 的前提下换掉 runtime：换之前把后端子
+        // 进程停掉（它还 mmap 着要被换的文件）、换完立刻重新拉起来——这两件事只有
+        // 壳知道怎么做，所以由壳注入给更新器。
+        RuntimeUpdater.shared.wireBackend(
+            stop: { [weak self] in
+                guard let self else { return }
+                self.currentURL = nil
+                self.window.title = appTitle
+                self.backend?.stop()
+                self.backend = nil
+            },
+            start: { [weak self] in self?.boot() },
+            conflicts: { [weak self] in
+                guard let self else { return [] }
+                var excluded: Set<Int> = []
+                if let port = self.currentURL?.port { excluded.insert(port) }
+                return conflictingBackends(excludingPorts: excluded)
+            })
+        // 上次更新如果装完了却没来得及切换（崩溃、强杀），趁后端还没起来先补上：
+        // 这个时刻没有任何进程还在用旧树，换目录最安全。
+        RuntimeUpdater.shared.adoptStagedAtLaunchIfAny()
         boot()
         // DSHX_AUTO_CHECK_UPDATE=1：启动 3 秒后自动跑一次「检查更新」。默认不开
         // （每次启动白给一次网络请求；用户要的是手动点）。留它是为了拿假更新源
@@ -526,6 +553,53 @@ final class ShellController: NSObject, WKNavigationDelegate, NSApplicationDelega
             DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
                 UpdateController.shared.check()
             }
+        }
+    }
+
+    /// 启动守卫：另一个 dsh 后端共用同一个 `DSH_HOME` 时，会话写锁会被占住
+    /// （模型切换报「当前会话已被占用」），换 runtime 也可能踩到正 mmap 的旧文件。
+    /// 返回 false = 用户选择退出，调用方不要再 boot。
+    private func resolveBackendConflictsOrExit() -> Bool {
+        var conflicts = conflictingBackends()
+        guard !conflicts.isEmpty else { return true }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "有另一个 dsh 后端正在使用同一个 DSH_HOME"
+        alert.informativeText = """
+            检测到：\(conflicts.map(\.text).joined(separator: "、"))
+            它会占住会话：模型切换会报「当前会话已被占用」，更新后端时也可能换到一半。
+            常见来源：插件市场的「重启」留下的孤儿进程，或 `open -n` 起的第二个实例。
+
+            结束这些进程后 dshX 会正常启动；它们正在服务的其它页面会断开。
+            """
+        alert.addButton(withTitle: "结束它们并继续")
+        alert.addButton(withTitle: "仍然打开")
+        alert.addButton(withTitle: "退出 dshX")
+        NSApp.activate(ignoringOtherApps: true)
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            for conflict in conflicts { kill(conflict.pid, SIGTERM) }
+            Thread.sleep(forTimeInterval: 1)
+            for conflict in conflictingBackends() { kill(conflict.pid, SIGKILL) }
+            Thread.sleep(forTimeInterval: 0.2)
+            conflicts = conflictingBackends()
+            if !conflicts.isEmpty {
+                let failed = NSAlert()
+                failed.alertStyle = .warning
+                failed.messageText = "没能结束这些 dsh 后端"
+                failed.informativeText = conflicts.map(\.text).joined(separator: "、")
+                    + "\n它们可能属于别的用户或受系统保护；这次先继续启动，"
+                    + "但模型切换可能仍会失败。"
+                failed.addButton(withTitle: "好")
+                failed.runModal()
+            }
+            return true
+        case .alertSecondButtonReturn:
+            shellLog("检测到其它 dsh 后端，用户选择仍然打开："
+                + conflicts.map(\.text).joined(separator: "、"))
+            return true
+        default:
+            return false
         }
     }
 
@@ -542,7 +616,11 @@ final class ShellController: NSObject, WKNavigationDelegate, NSApplicationDelega
         case .failure(let message):
             presentFailure(message)
         case .success(let plan):
-            presentBootPage("node  \(plan.node.path)\nentry \(plan.entry.path)\n"
+            let runtime = runtimeDirectory()
+            let backendVersion = installedBackendVersion(in: runtime)
+            shellLog("dsh 后端版本：\(backendVersion ?? "未知")（\(runtime.path)）")
+            presentBootPage("dsh   \(backendVersion ?? "版本未知")\n"
+                + "node  \(plan.node.path)\nentry \(plan.entry.path)\n"
                 + "cwd   \(plan.workspace.path)\nDSH_HOME \(plan.home.path)")
             let backend = Backend(
                 onURL: { [weak self] url in self?.connect(to: url) },
@@ -855,6 +933,13 @@ final class ShellController: NSObject, WKNavigationDelegate, NSApplicationDelega
     @objc func checkForUpdate() {
         UpdateController.shared.check()
     }
+
+    /// 「更新 dsh 后端…」＝只换 .app 里的 dsh 运行时（Contents/Resources/runtime），
+    /// 数据源是 npm registry 上的 @deepseek-ai/dsh。壳不退出、dshX 版本号也不变，
+    /// 适合「上游只改了 dsh」的时候——不用为此重新发一版 DMG（见 runtime-updater.swift）。
+    @objc func updateBackend() {
+        RuntimeUpdater.shared.check()
+    }
 }
 
 // MARK: - 环境变量
@@ -884,9 +969,13 @@ private func buildMainMenu() -> NSMenu {
 
     let appMenu = addSection(appTitle, to: menu)
     add(appMenu, "关于 \(appTitle)", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), "")
-    // 「检查更新…」按 macOS 惯例挨着「关于」放：它换的是整个 .app（后端跟着一起换），
-    // 与开发机链路的 update.sh 不是一回事，那条链路已经不在菜单里了。
+    // 两条更新链路，各管各的：
+    //   「检查更新…」换的是整个 .app（数据源是 dshX 自己的 GitHub Releases，后端跟着换）；
+    //   「更新 dsh 后端…」只换 .app 里那份 dsh 运行时（数据源是 npm registry 上的
+    //   @deepseek-ai/dsh），壳不退出、dshX 版本号不变——上游只改了 dsh 时走这条，
+    //   不必为它重新发一版 DMG（见 runtime-updater.swift）。
     add(appMenu, "检查更新…", #selector(ShellController.checkForUpdate), "u")
+    add(appMenu, "更新 dsh 后端…", #selector(ShellController.updateBackend), "b")
     appMenu.addItem(.separator())
     add(appMenu, "隐藏 \(appTitle)", #selector(NSApplication.hide(_:)), "h")
     appMenu.addItem(.separator())

@@ -59,6 +59,7 @@ TMPDIR="$ROOT/.tmp" xcrun swiftc -swift-version 5 -O \
   -module-cache-path "$ROOT/.modulecache" \
   -framework AppKit -framework WebKit \
   "$SHELL_DIR/Sources/main.swift" "$SHELL_DIR/Sources/updater.swift" \
+  "$SHELL_DIR/Sources/runtime-updater.swift" \
   -o "$APP/Contents/MacOS/$APP_NAME"
 
 # 编译成功不代表能启动：minos 一旦高于用户系统，双击只会得 -10825。

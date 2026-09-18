@@ -5,11 +5,12 @@
 # 本地自用脚本：把仓库 runtime/ 里装的 @deepseek-ai/dsh 升到更新的版本，然后
 # 重跑 make-app.sh 重建 dshX.app。非官方、ad-hoc 签名，不可分发。
 #
-# 为什么需要脚本、而不是在 App 里点一下就换后端：
-#   dshX.app 运行中的后端，正是 runtime/ 里那份 @deepseek-ai/dsh。页面没法把
-#   正在跑的自己替换掉，所以真正的更新必须在 App 外部做——换 runtime/、重建
-#   .app，再重开。本脚本就是这条「外部执行者」。原生壳里的「更新」菜单只是在
-#   能发现本脚本时，替你打开终端跑它（见 main.swift）。
+# 跟壳里那个「更新 dsh 后端…」（⌘B）的分工：
+#   ⌘B 换的是**已装 .app 里**那份运行时（npm registry → staging → 换目录 → 重启后端），
+#   壳不退出、也不用本机有源码；但仓库里的 runtime/ 与 build/ 里的产物它一概不动，
+#   下次重建 .app 又回到仓库里的版本。
+#   本脚本是**开发机链路**：改的是仓库 runtime/ 并重建 .app，好让 DMG 里也带上新版本。
+#   两条路挑版本用的是同一套规则（见 shell/Sources/runtime-updater.swift）。
 #
 # 用法
 #   ./update.sh                      # = check：只看有没有新版，不改动任何东西

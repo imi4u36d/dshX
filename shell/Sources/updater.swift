@@ -9,8 +9,10 @@ import CryptoKit
  runtime，后端也跟着一起换；本机不需要源码、npm 或 Xcode。
 
  数据来源是 dshX 仓库自己的 Releases（打 tag 时 CI 把 DMG 与 .sha256 挂上去，见
- .github/workflows/release-dmg.yml）。匿名读即可，未认证 API 限流 60 次/小时，
- 手动点着用不完；真被限流了给 App 设 DSH_GITHUB_TOKEN 就能绕过。
+ .github/workflows/release-dmg.yml）。匿名读即可，未认证 API 限流 60 次/小时——注意是
+ **按出口 IP** 算，走代理/VPN 时被别人用光也会记到同一个 IP 上；真被限流了给 App 设
+ DSH_GITHUB_TOKEN 就能绕过（认证后按 token 计 5000 次/小时）。403/429 的具体成因由
+ describeRateLimitFailure 分辨，出口 IP 与配额重置时间都会写进 backend.log。
 
  换包本身在 App 外面执行（shell/updater/apply-update.sh）：正在跑的后端就是从被替换
  的那份包里 mmap 出来的文件，让 App 自己覆盖自己只会把当前会话连根拔起。
@@ -192,6 +194,127 @@ func resolveUpdate(data: Data, current: String, arch: String,
         + "要么这个版本没发本架构的包，要么只能手动换（见 shell/README.md）。")
 }
 
+// MARK: - 403/429 诊断（纯函数：喂头和正文，不碰网络）
+
+/// 一次失败响应的可读诊断：弹窗里给人看的正文 + 记进 backend.log 的一行。
+struct RateLimitReport: Equatable {
+    let message: String
+    let logLine: String
+}
+
+/// URLSession 的 `allHeaderFields` 是 `AnyHashable: Any`，统一成小写名字再查。
+func normalizedHeaders(_ raw: [AnyHashable: Any]) -> [String: String] {
+    var out: [String: String] = [:]
+    for (key, value) in raw {
+        guard let name = (key as? String)?.lowercased() else { continue }
+        out[name] = (value as? String) ?? "\(value)"
+    }
+    return out
+}
+
+/// 接到日志尾巴上的配额摘要；没有 `x-ratelimit-*`（镜像或代理自己回的）就是空串。
+func rateLimitSummary(headers: [String: String]) -> String {
+    guard let remaining = headers["x-ratelimit-remaining"].flatMap({ Int($0) }) else { return "" }
+    let limit = headers["x-ratelimit-limit"].flatMap({ Int($0) }).map { "/\($0)" } ?? ""
+    var text = "，x-ratelimit \(remaining)\(limit)"
+    if let reset = headers["x-ratelimit-reset"].flatMap({ TimeInterval($0) }) {
+        text += "，\(clockText(Date(timeIntervalSince1970: reset))) 重置"
+    }
+    return text
+}
+
+/// GitHub 的限流正文形如 `{"message":"API rate limit exceeded for 81.168.109.157. …"}`。
+/// 拿不到就返回 nil——代理/镜像/网关自己回的 403 常常是 HTML，跟配额无关。
+func githubErrorMessage(in body: Data) -> String? {
+    guard let root = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+          let message = (root["message"] as? String)?
+              .trimmingCharacters(in: .whitespacesAndNewlines),
+          !message.isEmpty else { return nil }
+    return message
+}
+
+/// 从 GitHub 的正文里抠出这次请求的出口 IP：匿名配额按它算，说清楚比只说「限流了」有用。
+func exitIP(inGitHubMessage message: String) -> String? {
+    let tokens = message.split(whereSeparator: { $0 == " " || $0.isNewline })
+    for (index, token) in tokens.enumerated() where token == "for" {
+        guard index + 1 < tokens.count else { continue }
+        let candidate = String(tokens[index + 1])
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".,;:()"))
+        if looksLikeIP(candidate) { return candidate }
+    }
+    return nil
+}
+
+private func looksLikeIP(_ text: String) -> Bool {
+    guard !text.isEmpty else { return false }
+    let allowed = CharacterSet(charactersIn: "0123456789abcdefABCDEF.:")
+    guard text.unicodeScalars.allSatisfy({ allowed.contains($0) }) else { return false }
+    if text.contains(":") { return text.filter { $0 == ":" }.count >= 2 }   // IPv6
+    return text.split(separator: ".").count == 4                            // IPv4
+}
+
+/// 只看时分：限流窗口都是小时级的，日期是噪音。
+private func clockText(_ date: Date) -> String {
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.dateFormat = "HH:mm"
+    return formatter.string(from: date)
+}
+
+/// GitHub 的 message 有时带换行和一大段解释，压成一行再截断。
+private func oneLine(_ text: String, limit: Int) -> String {
+    let collapsed = text.split(whereSeparator: { $0.isNewline })
+        .joined(separator: " ")
+        .trimmingCharacters(in: .whitespaces)
+    return collapsed.count <= limit ? collapsed : String(collapsed.prefix(limit)) + "…"
+}
+
+/// 403/429 到底是哪种：匿名配额（按出口 IP 算）用尽、二级限流、还是代理自己拦的。
+/// 三种情形该说的话不一样，一律说成「限流」会把人引到错的方向。
+func describeRateLimitFailure(status: Int, headers: [String: String],
+                              body: Data) -> RateLimitReport {
+    let limit = headers["x-ratelimit-limit"].flatMap { Int($0) }
+    let remaining = headers["x-ratelimit-remaining"].flatMap { Int($0) }
+    let reset = headers["x-ratelimit-reset"].flatMap { TimeInterval($0) }
+        .map { Date(timeIntervalSince1970: $0) }
+    let retryAfter = headers["retry-after"].flatMap { Int($0) }
+    let apiMessage = githubErrorMessage(in: body)
+    let ip = apiMessage.flatMap { exitIP(inGitHubMessage: $0) }
+
+    var log = "更新源拒绝：HTTP \(status)"
+    if let remaining { log += "，x-ratelimit \(remaining)/\(limit.map(String.init) ?? "?")" }
+    if let reset { log += "，\(clockText(reset)) 重置" }
+    if let ip { log += "，出口 IP \(ip)" }
+    if let retryAfter { log += "，Retry-After \(retryAfter)s" }
+    log += apiMessage.map { "，GitHub：\(oneLine($0, limit: 120))" }
+        ?? "，正文不是 GitHub 的 JSON（\(body.count) 字节）"
+
+    // 正文都不像 GitHub 的 JSON：八成是代理/镜像/网关自己拦的，跟配额无关。
+    guard let apiMessage else {
+        return RateLimitReport(message:
+            "更新源返回 HTTP \(status)，但正文不像 GitHub 的 JSON——"
+            + "多半是代理/镜像/公司网关自己拦的 403，而不是 GitHub 的匿名限流。\n"
+            + "换个代理节点或直连试试；给 App 设 DSH_GITHUB_TOKEN=<token> "
+            + "也能把「匿名配额」这一项排除掉。", logLine: log)
+    }
+
+    var message = "GitHub 拒绝了这次请求（HTTP \(status)）：\(oneLine(apiMessage, limit: 200))\n"
+    if let ip { message += "· 出口 IP：\(ip)\n" }
+    if remaining == 0 {
+        message += "· 匿名配额已用尽（0/\(limit ?? 60)"
+        if let reset { message += "，\(clockText(reset)) 重置" }
+        message += "）。未认证请求按出口 IP 计 60 次/小时，"
+            + "代理/VPN 的共享出口被别人用光也算在这个 IP 上，跟本机点了几次无关。\n"
+    } else if let remaining {
+        message += "· x-ratelimit 还剩 \(remaining) 次，说明不是配额用尽，"
+            + "更像二级限流（同一出口短时间请求过多）或该 IP 被判滥用；等一两分钟再点。\n"
+    }
+    if let retryAfter { message += "· GitHub 要求 \(retryAfter) 秒后再试。\n" }
+    message += "给 App 设 DSH_GITHUB_TOKEN=<token> 可绕过匿名限流："
+        + "认证请求按 token 计数（5000 次/小时），跟出口 IP 的匿名配额无关。"
+    return RateLimitReport(message: message, logLine: log)
+}
+
 // MARK: - 引擎（只做事，不画界面）
 
 /// 查 / 下 / 校验 / 换包。回调都在主线程，宿主自己决定怎么展示。
@@ -239,28 +362,41 @@ final class UpdateEngine: NSObject, URLSessionDownloadDelegate {
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("\(appTitle)/\(currentAppVersion())", forHTTPHeaderField: "User-Agent")
-        if let token = envString("DSH_GITHUB_TOKEN") ?? envString("GITHUB_TOKEN"), !token.isEmpty {
+        let token = (envString("DSH_GITHUB_TOKEN") ?? envString("GITHUB_TOKEN"))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let authenticated = !(token ?? "").isEmpty
+        if let token, authenticated {
             request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
-        shellLog("检查更新：GET \(url.absoluteString)")
+        // 认证与否直接决定配额算在哪个桶里，日志里记一笔（token 本身当然不记）。
+        shellLog("检查更新：GET \(url.absoluteString)（\(authenticated ? "带 token" : "匿名")）")
         URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
             guard let self else { return }
-            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            let http = response as? HTTPURLResponse
+            let status = http?.statusCode ?? 0
+            let headers = normalizedHeaders(http?.allHeaderFields ?? [AnyHashable: Any]())
             let result: UpdateCheck
             if let error {
+                shellLog("取更新源失败：\(error.localizedDescription)")
                 result = .failure("取不到更新源：\(error.localizedDescription)\n"
                     + "这一步只要一次 GET；离线、代理、DNS 出问题都长这样。")
-            } else if status == 403 || status == 429 {
-                result = .failure("GitHub API 限流（HTTP \(status)）。"
-                    + "给 App 设 DSH_GITHUB_TOKEN=<token> 可以绕过匿名限流。")
-            } else if !(200...299).contains(status) {
-                result = .failure("更新源返回 HTTP \(status)。")
-            } else if let data, !data.isEmpty {
-                result = resolveUpdate(data: data, current: currentAppVersion(),
-                                       arch: machineArch(),
-                                       includePrerelease: envString("DSHX_ALLOW_PRERELEASE") == "1")
             } else {
-                result = .failure("更新源返回空内容。")
+                // 每次都记状态与剩余配额：下次弹 403，先看这行就知道配额花在哪了。
+                shellLog("更新源响应：HTTP \(status)\(rateLimitSummary(headers: headers))")
+                if status == 403 || status == 429 {
+                    let report = describeRateLimitFailure(status: status, headers: headers,
+                                                          body: data ?? Data())
+                    shellLog(report.logLine)
+                    result = .failure(report.message)
+                } else if !(200...299).contains(status) {
+                    result = .failure("更新源返回 HTTP \(status)。")
+                } else if let data, !data.isEmpty {
+                    result = resolveUpdate(data: data, current: currentAppVersion(),
+                                           arch: machineArch(),
+                                           includePrerelease: envString("DSHX_ALLOW_PRERELEASE") == "1")
+                } else {
+                    result = .failure("更新源返回空内容。")
+                }
             }
             DispatchQueue.main.async {
                 reset()

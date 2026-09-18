@@ -41,10 +41,12 @@ dsh-app/
   shell/
     Sources/main.swift        壳本体
     Sources/updater.swift     检查更新：读 Releases、比版本、挑包、下载校验、拉起换包脚本
+    Sources/runtime-updater.swift 更新 dsh 后端：读 npm registry、装进 staging、探活、
+                              给原生文件签名、换 runtime、重启后端（App 不退出）
     updater/apply-update.sh   换包执行者（App 退出后由它挂 DMG、替换、重开）
     tools/list-windows.swift  验证用：列出某进程的窗口（不需要截图权限）
     tools/update-check-test/  验证用：更新链路的离线用例 + 假更新源全流程演练
-    make-app.sh               一键组装 .app（updater.swift 与换包脚本一起打进去）
+    make-app.sh               一键组装 .app（updater.swift / runtime-updater.swift 与换包脚本一起打进去）
     make-dmg.sh               把 .app 打成 DMG（含回挂校验与 SHA-256）
     update.sh                 更新上游 dsh（开发机链路，只在终端里跑，不在菜单里）
     install-app.sh            把 build/dshX.app 装到 /Applications（运行态保护 + 备份 + 装完默认清掉产物）
@@ -87,7 +89,8 @@ INSTALL=1 KEEP=1 ./make-app.sh # 同上，但保留 build 产物（还要接着�
 > App 管理，给跑脚本的终端打勾，否则 `rm`/`ditto` 会给你个 `Operation not permitted`。
 > 自测这类脚本一定用 `--dest` 指到临时目录：漏一次就把真 app 盖了（本仓库踩过）。
 
-脚本做五件事：编译 Swift 壳（`main.swift` + `updater.swift` 一起编）→
+脚本做五件事：编译 Swift 壳（`main.swift` + `updater.swift` + `runtime-updater.swift`
+一起编）→
 ditto 拷运行时、拷 `updater/apply-update.sh` 到 `Resources/updater/` → 下载并校验
 Node 24.17.0（官方 tarball，SHA-256 比对）→ 拷图标 + 写 Info.plist → ad-hoc 签名。
 全程约 20 秒，产物约 404 MB；`make-dmg.sh` 压出来约 117 MB。
@@ -167,7 +170,8 @@ swift shell/tools/list-windows.swift   # 健在时窗口标题会带后端端口
   正常退出（`applicationShouldTerminate` → `stop()`）、`SIGTERM`/`SIGINT` 的
   DispatchSource 兜底、以及 `kill -9`/Force Quit 时由内嵌的 sh 看门狗按
   「父进程还在不在」收掉 node。
-- 菜单：**dshX › 检查更新…**（⌘U，紧挨「关于 dshX」，见「更新」一节）、
+- 菜单：**dshX › 检查更新…**（⌘U，换整个 App）、**dshX › 更新 dsh 后端…**（⌘B，只换
+  `.app` 里的 dsh 运行时），见「更新」一节；还有
   **文件 › 选择工作目录并重启后端**（⌘O）、**查看 › 重启后端**（⌘⇧R）、
   拷贝后端地址（⌘⇧C，含 token，可粘给浏览器）、在默认浏览器中打开（⌘⇧B）。
   页面里的右键菜单见上面那条：默认只有文本编辑项；要用 Web Inspector 就带
@@ -177,15 +181,53 @@ swift shell/tools/list-windows.swift   # 健在时窗口标题会带后端端口
 ## 更新
 
 dshX 只是壳，**真正跑的后端也打包在 `.app` 里**
-（`Contents/Resources/runtime/node_modules/@deepseek-ai/dsh`）。菜单里的
-**dshX › 检查更新…** 换的是**整个 .app**（后端跟着一起换）；改**仓库里的 `runtime/`
-再重建**是开发机链路，走命令行 `update.sh`，已经不在菜单里。共同的前提：换包不能在
-App 内部完成——页面正跑在被替换的那份后端上，所以两条路都把动作放到 App 外面。
+（`Contents/Resources/runtime/node_modules/@deepseek-ai/dsh`）。于是更新分成三条路：
+
+| 场景 | 入口 | 换掉什么 | 执行者 |
+| --- | --- | --- | --- |
+| 上游只更新了 dsh | 菜单 **dshX › 更新 dsh 后端…**（⌘B） | 只换 `.app` 里那份 dsh 运行时 | App 自己：先停后端，再换目录，再重启（`runtime-updater.swift`） |
+| dshX 自己发了新版 | 菜单 **dshX › 检查更新…**（⌘U） | 整个 `.app`（壳 + 后端） | App 退出后由 `updater/apply-update.sh` 接手 |
+| 开发机改壳/改仓库 runtime | 命令行 `update.sh` | 重建 `build/dshX.app` | 终端里的脚本 |
+
+共同的前提是「不能替换正在跑的东西」：
+
+- 只换 runtime 子目录时，**先停掉后端子进程**就够了——没有进程还 mmap 着里头那些
+  `.js`/`.node` 之后，同卷改名是安全的。所以这条能在 App 里做完，壳不退出。
+- 整包替换做不到：壳自己和 WebKit 就跑在被换的包里，只能退出后交给外在的脚本
+  （`apply-update.sh`）。所以「检查更新…」和 `update.sh` 都把动作放到 App 外面。
 
 > **本地改了壳、又要装到本机的人注意**：`make-app.sh` 的 `VERSION` 默认跟着最近一次
 > Release（现在是 0.2.2）。你在发版之后又动了壳、想留住本机这一份，构建时把版本抬到
 > **不低于**最新 Release（`VERSION=0.2.3 ./make-app.sh`）——低一档的话，点一次
 > **检查更新…** 就会拿源上那个包把你的改动整包换掉（换包换的是**整个 .app**，不留情面）。
+> （只点「更新 dsh 后端…」不会碰壳，没这个问题。）
+
+### 更新 dsh 后端…（⌘B）＝ 只换 runtime（上游只改了 dsh 时用这条）
+
+菜单位置：**dshX › 更新 dsh 后端…**，紧挨「检查更新…」。
+
+- **数据源**：npm registry 上的 `@deepseek-ai/dsh`（默认 `https://registry.npmjs.org`，
+  `DSHX_NPM_REGISTRY` 可指镜像）。**不是** dshX 的 GitHub Releases。
+- **挑版本**：dist-tags 里比当前新的最高版本；标签都落后时退回 `versions` 列表。
+  规则与 `update.sh` 的那段 awk 一致（上游把预发布发在 `next`/`alpha` 上，latest 常落后），
+  离线用例对过。
+- **弹窗**：与「检查更新…」一个规矩——当前版本、候选版本、来源标签、更新源、装到哪、
+  磁盘可用空间都写出来。没有新版就说「已是最新」，绝不悄悄降级。
+- **装**：用 `.app` 自带的 Node + pnpm（`Resources/node/bin/node` +
+  `Resources/tools/pnpm/package/bin/pnpm.cjs`）把 `@deepseek-ai/dsh@<版本>` 预装到
+  `runtime/.staged-<版本>/`，`--node-linker=hoisted` 保持跟 `npm ci` 那棵树同样的扁平布局。
+  装完先 `node …/dsh/lib/bin.js --version` 探活，再给树里的 Mach-O（按魔数认，不只
+  `*.node`）逐个 ad-hoc 签名——arm64 上没签名的原生代码会被内核杀掉。
+- **切**：停后端 → 现行 `node_modules` 改名成 `node_modules.bak-<旧版本>` →
+  staging 那棵改名成 `node_modules` → 再探一次活（失败就把备份挪回原位）→ 重启后端 →
+  收尾（换 `package.json`、裁备份、删 staging、删 pnpm store）→ 重新 ad-hoc 签 `.app`
+  （改了 Resources 之后原封条已经对不上），签不动只记日志。
+- **启动接管**：`adoptStagedAtLaunchIfAny()` 在每次启动、后端还没起来时检查有没有
+  `.staged-*`：有完整标记（`.dshx-runtime.json`）且版本更新就先把切换补上，没有标记的
+  半成品直接删掉——上次装到一半崩了也不会白占几百 MB。
+- **日志**：全部写进 `backend.log`（`[runtime]` / `[pnpm]` 前缀），弹窗里也给出路径。
+- **不碰**：`DSH_HOME`、会话历史、工作目录一概不动；只有 `runtime/` 与
+  `<私有目录>/pnpm-store` 会被写。
 
 ### 检查更新…（⌘U）＝ 换整个 App（装好的人用这条）
 
@@ -248,19 +290,32 @@ App 内部完成——页面正跑在被替换的那份后端上，所以两条�
 
 ### 怎么在不碰真 app 的前提下验一遍
 
-更新链路平时跑不到，出错又最难复现，所以配了两个脚本（都在 `tools/update-check-test/`）：
+更新链路平时跑不到，出错又最难复现，所以配了三个入口（都在 `tools/update-check-test/`）：
 
 ```sh
-bash tools/update-check-test/run.sh              # 离线：版本比较 + 挑包逻辑，不联网
+bash tools/update-check-test/run.sh              # 离线：版本比较 + 挑包逻辑 + 后端候选 + 提升/回滚
 bash tools/update-check-test/run.sh --check      # 联网只读：打真 Releases，看它怎么选
 bash tools/update-check-test/rehearse-update.sh  # 全流程：假更新源 + 假 App，真换包
+
+# 「更新 dsh 后端…」那条链路（真联网、真装、真换目录，但 runtime 是 .tmp 里的假的）
+bash tools/update-check-test/run.sh --runtime-check     # 只读：npm registry 上挑哪个版本
+bash tools/update-check-test/run.sh --runtime-rehearse  # 真装一遍并走完提升（几百 MB、几分钟）
 ```
 
-`rehearse-update.sh` 会在 `.tmp/rehearse/` 里造一个假 DMG 与一个假的 `dshX.app`，
-起一个 `127.0.0.1:8731` 的假更新源，然后跑**真实的那条链路**——下载、校验、退出、
-换包、回滚都会真的发生，只是都发生在临时目录里。`--tampered` 模式故意把包改坏一个
-字节，验证它会被拦下、旧包保持原样。写坏的包会**自动回滚**——这是它与
-`install-app.sh` 的主要区别（那边是开发机手装，靠运行态检查拦住）。
+- 离线那趟里，`提升/回滚演练` 会用假 runtime 跑**真的** `promoteRuntime()`：搭一棵自报
+  `0.0.1` 的假树 → 提升到 `1.2.3` → 断言版本变了、备份留下、staging 是被 rename 走的；
+  再拿一棵自报版本对不上的坏树去提升，断言它被拒且**整体回滚**（现行版本没变、备份挪回
+  原位）。这一步需要本机有 `node`（探活就是跑 `node …/bin.js --version`），`run.sh`
+  会从 PATH 里自动认；认不出就跳过并说明，不算失败。
+- `--runtime-rehearse` 会在 `<cwd>/.tmp/runtime-rehearse/runtime` 摆一棵假的现行树，
+  然后**真**去 npm 下载、pnpm 安装、探活、按魔数给原生文件签名、停/起假后端、改名切换，
+  最后断言提升后的版本、备份路径、以及「停一次、起一次」。默认跑完删现场；想留着看就
+  显式给 `DSHX_REHEARSE_DIR=<目录>`。
+- `rehearse-update.sh` 会在 `.tmp/rehearse/` 里造一个假 DMG 与一个假的 `dshX.app`，
+  起一个 `127.0.0.1:8731` 的假更新源，然后跑**真实的那条链路**——下载、校验、退出、
+  换包、回滚都会真的发生，只是都发生在临时目录里。`--tampered` 模式故意把包改坏一个
+  字节，验证它会被拦下、旧包保持原样。写坏的包会**自动回滚**——这是它与
+  `install-app.sh` 的主要区别（那边是开发机手装，靠运行态检查拦住）。
 
 ## 改了壳（main.swift）怎么装回去
 
@@ -347,6 +402,14 @@ bash install-app.sh --launch     # 3) 想常驻：先退出已装的 dshX，再�
      两条管道串起来），「每条都追加」才真的成立。
 - `kill -9` 壳之后，后端与看门狗都会自行退出（这是三条退出路径里唯一
   能自动化验证的一条；⌘Q 路径只有代码保证，Apple Events 被权限拦了）。
+- 「更新 dsh 后端…」验过的：内置 Node 24.17.0 + pnpm 10.20.0 **真装**了
+  `@deepseek-ai/dsh@0.1.6-alpha.2`（hoisted 布局，550 个包 / 483 个新增，24 秒），
+  两种布局都起得来后端并给出可访问地址（`--port 0` + 带 token 的 303）；
+  `run.sh` 的离线`提升/回滚演练`对真 `promoteRuntime()` 断言了「版本变了 / 备份留下 /
+  staging 是被 rename 走的 / 坏树被拒且整体回滚」；`--runtime-rehearse` 在假 runtime 上
+  走完整条链路（查 → 装 → 探活 → 签名 → 停后端 → 改名切换 → 起后端 → 留备份）全绿。
+- 一个记下来的坑：pnpm 默认会在进度里插一条「Update available! pnpm X → Y」的横幅，
+  会把进度文案顶掉，而且对这次更新毫无用处。加 `--config.update-notifier=false` 关掉。
 
 ## 卸载
 
@@ -364,6 +427,15 @@ rm -rf "$HOME/Library/WebKit/local.dshx.shell"        # WebView 缓存
   自己的图标（`ICNS=/path/to/your.icns ./make-app.sh`，见 `THIRD_PARTY_NOTICES.md`）。
 - 没有单实例锁。正常 `open` 不会重复启动，但 `open -n` 会起第二个实例，
   两个后端会共用同一个私有 `DSH_HOME`。
+- 第二个后端如果和当前 App 共用同一个 `DSH_HOME`（例如插件市场的「重启」留下的
+  孤儿进程），会占住会话写锁：alpha.2 起模型切换会提示「当前会话已被占用」。
+  dshX 启动时会检测这种进程，并给「结束它们并继续 / 仍然打开 / 退出」三个选择；
+  App 运行期间新出现的（比如刚点了插件市场的重启）仍要靠那条提示或
+  `lsof -nP -iTCP -sTCP:LISTEN | grep node` 手动找出来。
+- 「更新 dsh 后端…」按 registry 现解析依赖，**不走** `runtime/package-lock.json`
+  （那条锁文件只保 DMG 构建可复现）。上游换依赖时体积会跟着变（0.1.6-alpha.2 多出
+  `@deepseek-ai/libreoffice-kit-darwin-arm64`，解包多 260M），所以弹窗里先给你看可用空间。
+  它还要往 `/Applications/dshX.app` 里写文件，同样受 macOS 14+ 的「App 管理」约束。
 - 「能不能真跑一轮对话」没验证过：只确认了后端起来了、页面加载了、
   本地模型服务 `127.0.0.1:8000` 可达、且把 `~/.dsh/settings.yaml` 复制进了
   私有 home（里面没有明文凭据，只有 `apiKeyEnv: MTPLX_API_KEY`）。
