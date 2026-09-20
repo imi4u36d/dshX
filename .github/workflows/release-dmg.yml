@@ -71,6 +71,36 @@ jobs:
         working-directory: runtime
         run: npm ci --no-audit --no-fund
 
+      # 把签名证书放进一个一次性的临时钥匙串。runner 跑完就销毁，钥匙串不会留下。
+      # Secret 没配（比如 fork 或新克隆的仓库）就直接跳过，make-app.sh 会自己回退
+      # ad-hoc 并打印警告——那里是有意为之的兜底，不是故障。
+      # 注意：secret 不能直接写进 `if:`，所以这里用 env + shell 判断。
+      - name: 导入签名证书
+        env:
+          SIGNING_P12: ${{ secrets.DSHX_SIGNING_P12 }}
+          SIGNING_P12_PASSWORD: ${{ secrets.DSHX_SIGNING_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${SIGNING_P12}" ]]; then
+            echo "未配置 DSHX_SIGNING_P12，跳过导入；make-app.sh 将回退 ad-hoc。"
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/dshx-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -hex 16)"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 900 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          echo "$SIGNING_P12" | base64 -D > "$RUNNER_TEMP/signing.p12"
+          security import "$RUNNER_TEMP/signing.p12" -k "$KEYCHAIN" \
+            -P "$SIGNING_P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          rm -f "$RUNNER_TEMP/signing.p12"
+          # 必须进搜索列表：make-app.sh 用 `security find-identity -v -p codesigning`
+          # 判断身份在不在，而那个命令只看搜索列表里的钥匙串。
+          security list-keychains -d user -s "$KEYCHAIN" login.keychain-db
+          security find-identity -v -p codesigning "$KEYCHAIN"
+
       - name: 组装 dshX.app
         env:
           VERSION: ${{ steps.version.outputs.version }}
