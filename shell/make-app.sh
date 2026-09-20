@@ -230,14 +230,16 @@ printf 'APPL????' > "$APP/Contents/PkgInfo"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
 # 身份不在钥匙串里（换了机器、CI、没装证书）时回退 ad-hoc，而不是让打包直接失败。
-if [[ "$CODESIGN_IDENTITY" != "-" ]] \
-   && ! security find-identity -v -p codesigning 2>/dev/null | grep -qF "$CODESIGN_IDENTITY"; then
-  echo "警告：钥匙串里找不到签名身份「$CODESIGN_IDENTITY」，本次回退 ad-hoc。"
+# 先落成变量再 grep，不走管道：`security ... | grep -qF` 在 set -o pipefail 下会因为
+# grep 提前退出把 security 打成 SIGPIPE，身份明明在也会被判成不在、静默退回 ad-hoc。
+IDENTITIES="$(security find-identity -v -p codesigning 2>/dev/null || true)"
+if [[ "$CODESIGN_IDENTITY" != "-" ]] && ! grep -qF "$CODESIGN_IDENTITY" <<<"$IDENTITIES"; then
+  echo "警告：钥匙串里找不到签名身份「${CODESIGN_IDENTITY}」，本次回退 ad-hoc。"
   echo "      回退后 requirement 会绑到 cdhash，重新打包会让录屏等隐私授权失效。"
   CODESIGN_IDENTITY="-"
 fi
 
-say "代码签名（$CODESIGN_IDENTITY）"
+say "代码签名（${CODESIGN_IDENTITY}）"
 # Node 官方二进制保留它自己的 Developer ID 签名与 entitlements（含
 # disable-library-validation）；重签会把 entitlements 抹掉，反而可能让原生
 # 插件加载失败。所以这里只签我们自己的东西。
