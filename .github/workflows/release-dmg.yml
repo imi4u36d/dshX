@@ -27,16 +27,22 @@ jobs:
     # macos-15-intel / macos-26-intel 才是 Intel，别拿来跑 arm64 产物。
     runs-on: macos-15
     timeout-minutes: 45
+    # 签名证书的两个 Secret 挂在这个 Environment 上并设了 required reviewers：
+    # job 先卡在「等待批准」，批准之后才把 Secret 下发。所以即使有人能推 tag，
+    # 也拿不到私钥。
+    environment: release-signing
     permissions:
       contents: write # 只有打 tag 那条路径要建 Release，其余步骤用不到
     steps:
-      - uses: actions/checkout@v7
+      # action 按 commit SHA 钉死（注释里标原 tag）：Secret 会进这个 job，
+      # 浮动的 major tag 一旦被投毒，等于把私钥递出去。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0 # 算短 SHA 与 Release notes 需要完整历史
 
       # 只是为了让 npm ci 有 npm 用；真正打进 .app 的 Node 由 make-app.sh
       # 自己下载并校验 SHA-256，两者互不影响。
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '24'
 
@@ -124,7 +130,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: 上传 artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: dshX-${{ steps.version.outputs.version }}-arm64
           path: |
