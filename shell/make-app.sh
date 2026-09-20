@@ -6,7 +6,7 @@
 #                            校验签名，都过了才删掉 build 里的产物（省那 400M 双份）
 #
 # 可覆盖的环境变量：
-#   VERSION     写进 Info.plist 的 CFBundleShortVersionString/CFBundleVersion（默认 0.2.4）
+#   VERSION     写进 Info.plist 的 CFBundleShortVersionString/CFBundleVersion（默认 0.2.5）
 #   NODE_ARCH   内置 Node 的架构（默认取本机 uname -m，即与壳同架构）
 #   NODE_VERSION / ICNS / RUNTIME  见下面各默认值
 #   DEPLOY_TARGET 编译目标的最低 macOS（默认 12.0；别拿掉，否则 -10825）
@@ -32,7 +32,7 @@ APP="$BUILD/dshX.app"
 APP_NAME="dshX"
 BUNDLE_ID="local.dshx.shell"
 ICNS="${ICNS:-$ROOT/iconsrc/official.icns}"
-VERSION="${VERSION:-0.2.4}"
+VERSION="${VERSION:-0.2.5}"
 # 代码签名身份。默认钉在本机的 Apple Development 证书上：证书签名的 designated
 # requirement 是「bundle id + 证书」，重新打包、更新后端都不会变；ad-hoc 的
 # requirement 就是 cdhash 本身，二进制一变，macOS 的隐私授权（录屏等）立刻作废，
