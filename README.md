@@ -32,6 +32,12 @@ bash shell/make-dmg.sh          # 出 DMG
 
 Intel 机器加 `NODE_ARCH=x86_64`。
 
+打包默认用本机的 Apple Development 证书签名（`CODESIGN_IDENTITY` 可覆盖，设 `-`
+回到 ad-hoc）；钥匙串里没有该证书时自动回退 ad-hoc。这不是为了分发——DMG 仍未
+公证，Gatekeeper 照旧要手动放行——而是因为 ad-hoc 签名的 designated requirement
+就是 cdhash 本身，二进制一变，macOS 的隐私授权（录屏等）立刻作废、反复弹窗。用
+证书签名后 requirement 变成「bundle id + 证书」，重新打包和更新后端都不会掉授权。
+
 ## 许可
 
 仓库代码 MIT，见 [`LICENSE`](LICENSE)。

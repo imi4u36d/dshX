@@ -739,6 +739,31 @@ func signNativeArtifacts(in root: URL, log: (String) -> Void = { _ in },
     return (signed, failed)
 }
 
+/// 重签 .app 时该用哪个身份：**沿用 App 当前的身份**——证书签的包继续用同一张
+/// 证书，ad-hoc 的包继续 ad-hoc。
+///
+/// 这一步不能写死 `-`。macOS 的隐私授权（录屏、麦克风、自动化…）是按 designated
+/// requirement 存的：证书签名的 requirement 是「bundle id + 证书」，重新打包不会
+/// 变；ad-hoc 的 requirement 就是 cdhash 本身，二进制一变授权立刻作废。换过
+/// Resources 之后无脑 ad-hoc 重签，等于每次「更新 dsh 后端…」都把用户的授权清掉，
+/// 表现就是「设置里明明勾了允许，却还在反复弹窗」。
+///
+/// 封条此时已经对不上（刚换过 Resources），但 CodeDirectory 还在，
+/// `codesign -dvvv` 照样读得出当初用的证书。`DSHX_CODESIGN_IDENTITY` 可强制指定
+/// （`-` 表示 ad-hoc）。
+func currentSigningIdentity(of bundle: URL = Bundle.main.bundleURL) -> String {
+    if let override = ProcessInfo.processInfo.environment["DSHX_CODESIGN_IDENTITY"],
+       !override.isEmpty {
+        return override
+    }
+    let result = runProcess("/usr/bin/codesign", ["-dvvv", bundle.path], timeout: 30)
+    for line in result.output.split(separator: "\n") where line.hasPrefix("Authority=") {
+        let value = String(line.dropFirst("Authority=".count)).trimmingCharacters(in: .whitespaces)
+        if !value.isEmpty { return value }
+    }
+    return "-"
+}
+
 // MARK: - 引擎（只做事，不画界面）
 
 /// 查 / 装 / 提升 / 重启。界面回调都在主线程。
@@ -1039,16 +1064,30 @@ final class RuntimeInstaller {
         }
     }
 
-    /// 换过 Resources 之后包内封条已经对不上，重新 ad-hoc 签一次，让
-    /// `codesign --verify` 重新通过。签不动也只记日志，不影响已经跑起来的 App。
+    /// 换过 Resources 之后包内封条已经对不上，按原身份重新签一次，让
+    /// `codesign --verify` 重新通过、并保住 macOS 隐私授权。签不动也只记日志，
+    /// 不影响已经跑起来的 App。
     @discardableResult
     private func resignAppBundle() -> Bool {
         let bundle = Bundle.main.bundleURL
         guard bundle.pathExtension == "app" else { return false }
+        let identity = currentSigningIdentity(of: bundle)
         report(.resign, "正在重新签名 .app（整个包，几百 MB，要一会儿）…")
-        let result = runProcess("/usr/bin/codesign",
+        shellLog("重新签名 .app，身份：\(identity)")
+        var result = runProcess("/usr/bin/codesign",
+                                ["--force", "--sign", identity, "--timestamp=none", bundle.path],
+                                timeout: 300)
+        if result.status != 0, identity != "-" {
+            // 证书用不了（钥匙串被锁、证书过期、用户拒绝了钥匙串授权…）时不能就这么
+            // 收场：那会把包留在「封条已坏」的状态，下次启动可能被判成损坏。退回
+            // ad-hoc 至少让包重新可校验——代价是 requirement 变成 cdhash，录屏等
+            // 隐私授权要重新允许一次。
+            shellLog("用身份「\(identity)」重签失败，退回 ad-hoc 补救（隐私授权会失效）："
+                + result.output.trimmingCharacters(in: .whitespacesAndNewlines))
+            result = runProcess("/usr/bin/codesign",
                                 ["--force", "--sign", "-", "--timestamp=none", bundle.path],
                                 timeout: 300)
+        }
         guard result.status == 0 else {
             shellLog("重新签名 .app 失败（不影响使用）："
                 + result.output.trimmingCharacters(in: .whitespacesAndNewlines))

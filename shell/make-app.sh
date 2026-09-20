@@ -1,15 +1,16 @@
 #!/usr/bin/env bash
-# 组装 "dshX.app"：编译原生壳 → 装入 dsh runtime 与 Node → 写 Info.plist（含图标）→ ad-hoc 签名。
+# 组装 "dshX.app"：编译原生壳 → 装入 dsh runtime 与 Node → 写 Info.plist（含图标）→ 代码签名。
 #
 #   ./make-app.sh            只组装到 build/dshX.app（产物留着，供 make-dmg.sh / 先试装）
 #   INSTALL=1 ./make-app.sh  组装完交给 install-app.sh：运行态保护 + 备份 + 装后
 #                            校验签名，都过了才删掉 build 里的产物（省那 400M 双份）
 #
 # 可覆盖的环境变量：
-#   VERSION     写进 Info.plist 的 CFBundleShortVersionString/CFBundleVersion（默认 0.2.3）
+#   VERSION     写进 Info.plist 的 CFBundleShortVersionString/CFBundleVersion（默认 0.2.4）
 #   NODE_ARCH   内置 Node 的架构（默认取本机 uname -m，即与壳同架构）
 #   NODE_VERSION / ICNS / RUNTIME  见下面各默认值
 #   DEPLOY_TARGET 编译目标的最低 macOS（默认 12.0；别拿掉，否则 -10825）
+#   CODESIGN_IDENTITY  签名身份（默认本机 Apple Development 证书）；设 - 回退 ad-hoc
 #   INSTALL=1   组装完顺带安装（走 install-app.sh，没它只组装）
 #   KEEP=1      安装后保留 build 产物（配合 INSTALL=1；还要打 DMG 时用）
 #   FORCE=1     跳过「dshX 还在跑」拦截（自负风险）
@@ -17,9 +18,11 @@
 # 前置一：runtime/ 里已 npm install 好 @deepseek-ai/dsh（见 README.md）。
 # 前置二：iconsrc/official.icns 存在；它取自官方 DSH Desktop.app 的
 #         Contents/Resources/icon.icns（官方鲸鱼标，11 个尺寸齐全）。
-#         注意产物是 ad-hoc 签名、没有 Developer ID 与公证：别人拿到 DMG 后
-#         首次打开要手动放行 Gatekeeper；也不要以「官方出品」的名义宣传
-#         （见 README 的「非官方声明」与上游 BRAND_GUIDELINES.md）。
+#         注意产物是用本机 Apple Development 证书签的（见 CODESIGN_IDENTITY），
+#         没有 Developer ID、也没公证：别人拿到 DMG 后首次打开要手动放行
+#         Gatekeeper。证书一年一过期，过期后要换证重签，届时隐私授权会再问一次。
+#         也不要以「官方出品」的名义宣传（见 README 的「非官方声明」与上游
+#         BRAND_GUIDELINES.md）。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -29,7 +32,13 @@ APP="$BUILD/dshX.app"
 APP_NAME="dshX"
 BUNDLE_ID="local.dshx.shell"
 ICNS="${ICNS:-$ROOT/iconsrc/official.icns}"
-VERSION="${VERSION:-0.2.3}"
+VERSION="${VERSION:-0.2.4}"
+# 代码签名身份。默认钉在本机的 Apple Development 证书上：证书签名的 designated
+# requirement 是「bundle id + 证书」，重新打包、更新后端都不会变；ad-hoc 的
+# requirement 就是 cdhash 本身，二进制一变，macOS 的隐私授权（录屏等）立刻作废，
+# 用户看到的就是「设置里明明勾了允许，却还在反复弹窗」。设 CODESIGN_IDENTITY=-
+# 可以显式回到 ad-hoc。
+CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Apple Development: wxwzmail@163.com (HH7JYWFN2V)}"
 NODE_VERSION="${NODE_VERSION:-24.17.0}"
 # 内置的 Node 必须和壳同架构：Intel 上装 arm64 的 node 会直接跑不起来。
 NODE_ARCH="${NODE_ARCH:-$(uname -m)}"
@@ -220,15 +229,27 @@ PLIST
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 plutil -lint "$APP/Contents/Info.plist" >/dev/null
 
-say "ad-hoc 签名"
+# 身份不在钥匙串里（换了机器、CI、没装证书）时回退 ad-hoc，而不是让打包直接失败。
+if [[ "$CODESIGN_IDENTITY" != "-" ]] \
+   && ! security find-identity -v -p codesigning 2>/dev/null | grep -qF "$CODESIGN_IDENTITY"; then
+  echo "警告：钥匙串里找不到签名身份「$CODESIGN_IDENTITY」，本次回退 ad-hoc。"
+  echo "      回退后 requirement 会绑到 cdhash，重新打包会让录屏等隐私授权失效。"
+  CODESIGN_IDENTITY="-"
+fi
+
+say "代码签名（$CODESIGN_IDENTITY）"
 # Node 官方二进制保留它自己的 Developer ID 签名与 entitlements（含
 # disable-library-validation）；重签会把 entitlements 抹掉，反而可能让原生
 # 插件加载失败。所以这里只签我们自己的东西。
+# 包内的 .node 保持 ad-hoc 就够（实测和证书签名的外壳混签能过 codesign --verify）：
+# 决定 TCC 认哪个 App 的是最外层 .app 的签名，身份必须用在那一个上。
 find "$APP" -type f -name '*.node' -print0 \
   | xargs -0 -n1 codesign --force --sign - --timestamp=none 2>/dev/null || true
-codesign --force --sign - --timestamp=none "$APP"
+codesign --force --sign "$CODESIGN_IDENTITY" --timestamp=none "$APP"
 codesign --verify --verbose=1 "$APP" && echo "app 包签名校验通过"
 codesign --verify --verbose=1 "$APP/Contents/Resources/node/bin/node" && echo "内置 node 签名完好"
+# 把 requirement 打出来：换成证书身份后这里应该是 identifier + 证书，不含 cdhash。
+codesign -d -r- "$APP" 2>&1 | sed -n 's|^# designated => |requirement: |p' || true
 
 say "产物"
 du -sh "$APP"

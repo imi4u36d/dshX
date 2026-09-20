@@ -3,12 +3,12 @@
 #
 #   ./make-dmg.sh                     # build/dshX.app → build/dshX-<版本>-<架构>.dmg
 #   APP=/path/别的.app ./make-dmg.sh  # 换源
-#   VERSION=0.2.3 ./make-dmg.sh       # 覆盖文件名与卷标里的版本号
+#   VERSION=0.2.4 ./make-dmg.sh       # 覆盖文件名与卷标里的版本号
 #   OUT_DIR=dist ./make-dmg.sh        # 换输出目录
 #
 # 产物旁边会留一个 .dmg.sha256；CI 把两者一起传上去。
-# 说明：DMG 本身不做签名/公证（壳是 ad-hoc 签名），所以对方首次打开要手动
-# 放行 Gatekeeper，README 里有步骤。
+# 说明：DMG 本身不做签名/公证（壳用 Apple Development 证书签；CI 的机器上没有
+# 这张证书，会回退 ad-hoc），所以对方首次打开要手动放行 Gatekeeper，README 里有步骤。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
