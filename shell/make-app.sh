@@ -251,7 +251,9 @@ codesign --force --sign "$CODESIGN_IDENTITY" --timestamp=none "$APP"
 codesign --verify --verbose=1 "$APP" && echo "app 包签名校验通过"
 codesign --verify --verbose=1 "$APP/Contents/Resources/node/bin/node" && echo "内置 node 签名完好"
 # 把 requirement 打出来：换成证书身份后这里应该是 identifier + 证书，不含 cdhash。
-codesign -d -r- "$APP" 2>&1 | sed -n 's|^# designated => |requirement: |p' || true
+# 两种前缀都要匹配：ad-hoc 的 requirement 是推导出来的，带 `# ` 前缀；证书签名的
+# 是显式存下来的，没有前缀。只匹配带 `#` 的那种，恰好会在证书签名时什么都不打。
+codesign -d -r- "$APP" 2>&1 | sed -n -E 's|^#? *designated => |requirement: |p' || true
 
 say "产物"
 du -sh "$APP"
