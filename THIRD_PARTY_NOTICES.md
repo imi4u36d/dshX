@@ -5,9 +5,9 @@
 
 ## 1. `@deepseek-ai/dsh` 及其整棵依赖树
 
-- 来源：npm 公共源 `registry.npmjs.org`，版本 `0.1.5-rc.2`
-- 锁定方式：`runtime/package-lock.json`（lockfileVersion 3，581 个包条目，
-  其中 `@deepseek-ai/*` 241 个）
+- 来源：npm 公共源 `registry.npmjs.org`，版本 `0.1.6-alpha.2`
+- 锁定方式：`runtime/package-lock.json`（lockfileVersion 3，556 个包条目，
+  其中 `@deepseek-ai/*` 271 个）
 - 许可：MIT，Copyright (c) 2026 DeepSeek
 - 许可原文：[`licenses/dsh-LICENSE.txt`](licenses/dsh-LICENSE.txt)
 - 上游项目：<https://github.com/deepseek-ai/deepseek-harness>

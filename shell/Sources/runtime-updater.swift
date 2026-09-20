@@ -878,8 +878,9 @@ final class RuntimeInstaller {
             return .failure(message)
         }
 
+        let stagedNodeModules = staging.appendingPathComponent("node_modules", isDirectory: true)
         report(.verify, "正在探活新树（dsh --version）…")
-        let entry = staging.appendingPathComponent("node_modules/\(dshPackageName)/lib/bin.js")
+        let entry = stagedNodeModules.appendingPathComponent("\(dshPackageName)/lib/bin.js")
         guard let reported = runDshVersion(entry: entry) else {
             try? fm.removeItem(at: staging)
             return .failure("新树跑不起来：`node …/dsh/lib/bin.js --version` 没有输出。\n"
@@ -893,7 +894,7 @@ final class RuntimeInstaller {
 
         report(.sign, "正在给原生模块签名…")
         let signing = signNativeArtifacts(
-            in: staging.appendingPathComponent("node_modules", isDirectory: true),
+            in: stagedNodeModules,
             log: { line in shellLog("[runtime] \(line)") },
             onProgress: { [weak self] done, total in
                 self?.report(.sign, "正在给原生模块签名…（\(done)/\(total)）",
