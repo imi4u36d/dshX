@@ -3,7 +3,7 @@
 # update.sh —— 更新本项目依赖的上游 dsh（@deepseek-ai/dsh）
 #
 # 本地自用脚本：把仓库 runtime/ 里装的 @deepseek-ai/dsh 升到更新的版本，然后
-# 重跑 make-app.sh 重建 dshX.app。非官方、ad-hoc 签名，不可分发。
+# 重跑 make-app.sh 重建 dshX.app。非官方、本地签名未经公证，不可分发。
 #
 # 跟壳里那个「更新 dsh 后端…」（⌘B）的分工：
 #   ⌘B 换的是**已装 .app 里**那份运行时（npm registry → staging → 换目录 → 重启后端），

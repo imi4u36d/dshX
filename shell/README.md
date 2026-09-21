@@ -28,7 +28,7 @@ open build/dshX.app
 2. 拷入 `runtime/node_modules`
 3. 下载官方 Node 并按 `SHASUMS256.txt` 校验
 4. 写入图标与 `Info.plist`
-5. ad-hoc 签名并回验
+5. 用本机 Apple Development 证书签名并回验（钥匙串里没有该证书时回退 ad-hoc）
 
 安装到 `/Applications`：
 
@@ -53,6 +53,25 @@ INSTALL=1 bash shell/make-app.sh
 ```text
 ~/Library/Application Support/dshX/backend.log
 ```
+
+## WebKit 兼容补丁
+
+壳在 `documentStart` 注入两段脚本，都是 WebKit 与 Chromium 的差异补偿：
+
+- **整页不滚、不缩放**：`allowsMagnification` 关掉，并注入一段 CSS 把文档层钉死
+  （`html,body,#root{overflow:hidden;overscroll-behavior:none}`）。前端根样式只有
+  `height:100%`，终端、代码块、右侧面板这些 `overflow:auto` 的容器滚到边界后会把
+  滚动链交给文档层，整个页面跟着上下、左右弹——只在某个容器滚到底时才出现，看着像
+  「偶尔整页会滚」。注入只钉文档层，内部滚动区照旧能滚。
+  调试开关：`DSHX_PINCH_ZOOM=1` 恢复双指缩放、`DSHX_ALLOW_PAGE_SCROLL=1` 不注入样式。
+- **弹层里的行点得动**：Safari 引擎在 `mousedown` 时会把焦点从当前元素上拿走，却不给
+  被点的 `<button>`（Chromium 会给）；dsh 的弹层在 `onBlur` 里关自己，于是「菜单弹得
+  出来、点模型没反应」。补丁在 `[role=menu]` / `[role=listbox]` 内的行上按下鼠标时
+  `preventDefault`，不让焦点迁移。
+  调试开关：`DSHX_DISABLE_MENU_FOCUS_SHIM=1` 关掉补丁复现原问题。
+
+> 这两段补丁曾在 `8ad0668` 重写 `main.swift` 时被整段丢掉，0.2.3 起重新出现整页滚动。
+> 改这块代码时注意别再把 `fixedShellGuardScript` 的注入漏掉。
 
 ## App 自更新
 

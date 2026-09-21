@@ -91,5 +91,14 @@ du -sh "$DMG"
 echo
 echo "$DMG"
 echo
-echo "对方首次打开要放行 Gatekeeper（ad-hoc 签名、无公证）："
+# 提示语按实际签名来源来，而不是写死 ad-hoc：本机默认用 Apple Development 证书签，
+# CI 机器上没有这张证书才会回退 ad-hoc（回退逻辑见 make-app.sh）。
+# 注意 codesign 要 `-dvv` 才打印 Authority，`-dv` 只有 TeamIdentifier。
+SIGN_AUTHORITY="$(codesign -dvv "$APP" 2>&1 | sed -n 's/^Authority=//p' | head -1)"
+if [[ -n "$SIGN_AUTHORITY" ]]; then
+  SIGN_KIND="证书签名：${SIGN_AUTHORITY}"
+else
+  SIGN_KIND="ad-hoc 签名"
+fi
+echo "对方首次打开要放行 Gatekeeper（${SIGN_KIND}、未经 Apple 公证）："
 echo "  xattr -dr com.apple.quarantine \"/Applications/${APP_NAME}.app\""

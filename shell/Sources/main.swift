@@ -78,6 +78,56 @@ private let menuFocusShimScript = """
 })();
 """
 
+/// 整页滚动 / 双指缩放守卫。
+///
+/// 壳把网页当「固定尺寸的原生界面」用：整页不该滚、也不该被放大后四下拖动。
+/// 两种「整个 App 都能滚」的来源都在壳这一侧，跟页面内容无关：
+///   1. 双指缩放。macOS 上 WKWebView 的 allowsMagnification 默认是 NO；一旦打开，
+///      整个页面就变成可四方拖动的图层。
+///   2. 橡皮筋（rubber band）。前端根样式只有 `html,body,#root{height:100%;margin:0}`，
+///      没有 overflow 限制，也没有 overscroll-behavior：终端输出 / 代码块 / 右侧面板
+///      这些 overflow:auto 的容器滚到边界后，滚动链就交给文档层，整个页面跟着上下、
+///      左右地弹——这正是「偶尔整页会滚」的成因（只在某个容器滚到底时才出现）。
+/// 所以这里两样都关掉：
+///   - allowsMagnification 默认 NO；
+///   - documentStart 注入一段 CSS 把文档层钉死（`overflow:hidden` + `overscroll-behavior:none`）。
+/// 只钉文档层，内部 overflow:auto 的滚动区不受影响，仍然正常滚。
+///
+/// 注意：这段守卫在 0.2.3 的 `8ad0668`（重写 main.swift 修模型切换）里被整段丢掉，
+/// 0.2.3 起又回到了「整页能滚」。这里按原样恢复。
+///
+/// 排查开关：
+///   DSHX_PINCH_ZOOM=1        恢复双指缩放（代价是回到「整页能拖着走」）
+///   DSHX_ALLOW_PAGE_SCROLL=1 不注入固定布局样式（文档层重新可滚 / 橡皮筋）
+private let pinchZoomEnabled = ProcessInfo.processInfo.environment["DSHX_PINCH_ZOOM"] == "1"
+private let pageScrollAllowed = ProcessInfo.processInfo.environment["DSHX_ALLOW_PAGE_SCROLL"] == "1"
+
+private let fixedShellStyle = """
+html,body,#root{overflow:hidden !important;overscroll-behavior:none !important}
+"""
+
+/// 用 documentStart 的 <style> 注入：React 挂载前规则就已生效，
+/// 注入点在 document.head 还没建好时退回 documentElement，再不行等 DOMContentLoaded 补一次。
+/// 页面重新导航（换会话、热更新）时脚本会重新注入，所以没必要监听 SPA 路由。
+private let fixedShellGuardScript = """
+(function () {
+  var id = '__dshx_fixed_shell__';
+  var css = '\(fixedShellStyle)';
+  function inject() {
+    if (document.getElementById(id)) { return; }
+    var host = document.head || document.documentElement;
+    if (!host) { return; }
+    var style = document.createElement('style');
+    style.id = id;
+    style.textContent = css;
+    host.appendChild(style);
+  }
+  inject();
+  document.addEventListener('DOMContentLoaded', inject);
+  window.addEventListener('load', inject);
+})();
+"""
+
 // MARK: - Runtime
 
 struct RuntimePlan {
@@ -594,7 +644,10 @@ final class ShellController: NSObject, WKNavigationDelegate, NSApplicationDelega
         let bridge = WebLogBridge()
         bridge.controller = self
         configuration.userContentController.add(bridge, name: webLogMessageName)
-        for source in (menuFocusShimEnabled ? [webLogScript, menuFocusShimScript] : [webLogScript]) {
+        var pageScripts = [webLogScript]
+        if menuFocusShimEnabled { pageScripts.append(menuFocusShimScript) }
+        if !pageScrollAllowed { pageScripts.append(fixedShellGuardScript) }
+        for source in pageScripts {
             configuration.userContentController.addUserScript(WKUserScript(
                 source: source,
                 injectionTime: .atDocumentStart,
@@ -604,7 +657,7 @@ final class ShellController: NSObject, WKNavigationDelegate, NSApplicationDelega
         let webView = WKWebView(frame: frame, configuration: configuration)
         webView.navigationDelegate = self
         webView.allowsBackForwardNavigationGestures = false
-        webView.allowsMagnification = false
+        webView.allowsMagnification = pinchZoomEnabled
         if #available(macOS 13.3, *) { webView.isInspectable = false }
         self.webView = webView
 
