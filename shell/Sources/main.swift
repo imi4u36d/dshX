@@ -81,34 +81,53 @@ private let menuFocusShimScript = """
 /// 整页滚动 / 双指缩放守卫。
 ///
 /// 壳把网页当「固定尺寸的原生界面」用：整页不该滚、也不该被放大后四下拖动。
-/// 两种「整个 App 都能滚」的来源都在壳这一侧，跟页面内容无关：
+/// 三个「整个 App 都能滚」的来源，全都在壳这一侧，跟页面内容无关：
+///
 ///   1. 双指缩放。macOS 上 WKWebView 的 allowsMagnification 默认是 NO；一旦打开，
 ///      整个页面就变成可四方拖动的图层。
-///   2. 橡皮筋（rubber band）。前端根样式只有 `html,body,#root{height:100%;margin:0}`，
-///      没有 overflow 限制，也没有 overscroll-behavior：终端输出 / 代码块 / 右侧面板
-///      这些 overflow:auto 的容器滚到边界后，滚动链就交给文档层，整个页面跟着上下、
-///      左右地弹——这正是「偶尔整页会滚」的成因（只在某个容器滚到底时才出现）。
-/// 所以这里两样都关掉：
+///   2. 文档层滚动。前端根样式只有 `html,body,#root{height:100%;margin:0}`，没有
+///      overflow 限制，也没有 overscroll-behavior；某个 overflow:auto 的容器滚到边界后
+///      滚动链交给文档层，整页跟着上下、左右弹。
+///   3. **程序化滚动（真正难缠的那个）**。`overflow:hidden` 的盒子仍然是滚动容器，
+///      只是不给用户滚动条——`scrollIntoView` / `focus` 照样能把它滚走。dsh 的布局容器
+///      `[class*="_frame"]`（AppFrame）正是 `overflow:hidden`，而它的网格比视口宽一列
+///      右侧栏：实测 1280 宽的窗口里 `scrollWidth` 是 1856。于是页面里任何一次
+///      `scrollIntoView`（聚焦输入框、选中会话行、插件打开面板都算）落在离屏区域，
+///      就会把整个 AppFrame 横移最多 576px——表现就是「偶尔整个页面左右滚」。纵向同理，
+///      只要 frame 或文档层竖向溢出，就会被同样地推走。
+///
+/// 所以这里三层一起上：
 ///   - allowsMagnification 默认 NO；
-///   - documentStart 注入一段 CSS 把文档层钉死（`overflow:hidden` + `overscroll-behavior:none`）。
-/// 只钉文档层，内部 overflow:auto 的滚动区不受影响，仍然正常滚。
+///   - documentStart 注入 CSS 把文档层钉死（`overflow:hidden` 兜底 + `overflow:clip`）；
+///   - `overflow:clip` 而不是 `hidden`：`clip` 不产生滚动容器，程序化滚动也动不了它。
+///     框架容器上这条覆盖面最大，另外再用一段 scroll 捕获兜底（见下）。
+/// 只钉「整页级」容器，内部 overflow:auto 的滚动区（终端、代码块、消息列表）照旧能滚。
 ///
-/// 注意：这段守卫在 0.2.3 的 `8ad0668`（重写 main.swift 修模型切换）里被整段丢掉，
-/// 0.2.3 起又回到了「整页能滚」。这里按原样恢复。
+/// 历史：这段守卫在 0.2.3 的 `8ad0668`（重写 main.swift 修模型切换）里被整段丢掉，
+/// 0.2.3 起又回到了「整页能滚」；0.2.6 恢复成 `hidden` 版本，实测对第 3 条无效，
+/// 0.2.7 才补上 `clip` 与兜底。
 ///
-/// 排查开关：
+/// 排查开关（三者任一都可能让「整页又能滚」回来，用来定位是不是这条规则的锅）：
 ///   DSHX_PINCH_ZOOM=1        恢复双指缩放（代价是回到「整页能拖着走」）
-///   DSHX_ALLOW_PAGE_SCROLL=1 不注入固定布局样式（文档层重新可滚 / 橡皮筋）
+///   DSHX_ALLOW_PAGE_SCROLL=1 完全不注入这段样式与兜底
 private let pinchZoomEnabled = ProcessInfo.processInfo.environment["DSHX_PINCH_ZOOM"] == "1"
 private let pageScrollAllowed = ProcessInfo.processInfo.environment["DSHX_ALLOW_PAGE_SCROLL"] == "1"
 
-private let fixedShellStyle = """
-html,body,#root{overflow:hidden !important;overscroll-behavior:none !important}
-"""
+/// `overflow:hidden` 先写、`overflow:clip` 后写：老引擎（Safari 15.4 以前）不认识 `clip`，
+/// 会丢掉后面那条、留下 `hidden`，至少不会比从前更差。
+/// 必须写成一整行：它会被拼进 JS 的单引号字符串里，换行会让整段脚本语法错误。
+private let fixedShellStyle = "html,body,#root{overflow:hidden !important;overflow:clip !important;"
+    + "overscroll-behavior:none !important}"
+    + "#root [class*=\"_frame\"]{overflow:hidden !important;overflow:clip !important}"
 
 /// 用 documentStart 的 <style> 注入：React 挂载前规则就已生效，
 /// 注入点在 document.head 还没建好时退回 documentElement，再不行等 DOMContentLoaded 补一次。
 /// 页面重新导航（换会话、热更新）时脚本会重新注入，所以没必要监听 SPA 路由。
+///
+/// 末尾那段 scroll 捕获是兜底：CSS 里那条 `[class*="_frame"]` 依赖上游的类名约定，
+/// 万一将来改了名，这里还能在容器被程序化滚走的那一刻把它钉回原点，并就地换成
+/// `overflow:clip`（只动真正被滚、且当前是 hidden 的那一个方向，避免误伤
+/// `overflow-x:hidden; overflow-y:auto` 这类正常滚动区）。
 private let fixedShellGuardScript = """
 (function () {
   var id = '__dshx_fixed_shell__';
@@ -125,6 +144,24 @@ private let fixedShellGuardScript = """
   inject();
   document.addEventListener('DOMContentLoaded', inject);
   window.addEventListener('load', inject);
+
+  function pin(element) {
+    if (!element || element.nodeType !== 1) { return; }
+    if (element === document.documentElement || element === document.body) { return; }
+    var style = getComputedStyle(element);
+    var rect = element.getBoundingClientRect();
+    var wide = rect.width >= window.innerWidth * 0.8;
+    var tall = rect.height >= window.innerHeight * 0.8;
+    if (style.overflowX === 'hidden' && wide && element.scrollLeft !== 0) {
+      element.scrollLeft = 0;
+      element.style.setProperty('overflow-x', 'clip', 'important');
+    }
+    if (style.overflowY === 'hidden' && tall && element.scrollTop !== 0) {
+      element.scrollTop = 0;
+      element.style.setProperty('overflow-y', 'clip', 'important');
+    }
+  }
+  document.addEventListener('scroll', function (event) { pin(event.target); }, true);
 })();
 """
 

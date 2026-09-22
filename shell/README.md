@@ -58,20 +58,29 @@ INSTALL=1 bash shell/make-app.sh
 
 壳在 `documentStart` 注入两段脚本，都是 WebKit 与 Chromium 的差异补偿：
 
-- **整页不滚、不缩放**：`allowsMagnification` 关掉，并注入一段 CSS 把文档层钉死
-  （`html,body,#root{overflow:hidden;overscroll-behavior:none}`）。前端根样式只有
-  `height:100%`，终端、代码块、右侧面板这些 `overflow:auto` 的容器滚到边界后会把
-  滚动链交给文档层，整个页面跟着上下、左右弹——只在某个容器滚到底时才出现，看着像
-  「偶尔整页会滚」。注入只钉文档层，内部滚动区照旧能滚。
-  调试开关：`DSHX_PINCH_ZOOM=1` 恢复双指缩放、`DSHX_ALLOW_PAGE_SCROLL=1` 不注入样式。
+- **整页不滚、不缩放**：`allowsMagnification` 关掉，并注入 CSS + 一段 scroll 兜底，
+  把「整页级」容器钉死。三个来源：
+  1. 双指缩放——一旦打开，整页变成可四方拖动的图层；
+  2. 文档层滚动——前端根样式只有 `height:100%`，`overflow:auto` 的容器滚到边界后把
+     滚动链交给文档层，整页跟着上下、左右弹；
+  3. **程序化滚动**——`overflow:hidden` 的盒子仍然是滚动容器，`scrollIntoView` /
+     `focus` 照样能把它滚走。dsh 的布局容器 `[class*="_frame"]`（AppFrame）就是
+     `overflow:hidden`，而它的网格比视口宽一列右侧栏（1280 宽的窗口里 `scrollWidth`
+     是 1856），于是页面里任何一次 `scrollIntoView` 落在离屏区域，就会把整个 AppFrame
+     横移最多 576px——这才是「偶尔整页左右滚」的真正原因，前两条的解释都不对。
+  所以用 `overflow:clip` 而不是 `hidden`：`clip` 不产生滚动容器，程序化滚动也动不了它。
+  只钉整页级容器，内部 `overflow:auto` 的滚动区照旧能滚（已实测：`overflow:auto` 和
+  `overflow-x:hidden; overflow-y:auto` 的大滚动区都不受影响）。
+  调试开关：`DSHX_PINCH_ZOOM=1` 恢复双指缩放、`DSHX_ALLOW_PAGE_SCROLL=1` 完全不注入。
 - **弹层里的行点得动**：Safari 引擎在 `mousedown` 时会把焦点从当前元素上拿走，却不给
   被点的 `<button>`（Chromium 会给）；dsh 的弹层在 `onBlur` 里关自己，于是「菜单弹得
   出来、点模型没反应」。补丁在 `[role=menu]` / `[role=listbox]` 内的行上按下鼠标时
   `preventDefault`，不让焦点迁移。
   调试开关：`DSHX_DISABLE_MENU_FOCUS_SHIM=1` 关掉补丁复现原问题。
 
-> 这两段补丁曾在 `8ad0668` 重写 `main.swift` 时被整段丢掉，0.2.3 起重新出现整页滚动。
-> 改这块代码时注意别再把 `fixedShellGuardScript` 的注入漏掉。
+> 整页滚动这段补丁曾在 `8ad0668` 重写 `main.swift` 时被整段丢掉（0.2.3 起回归）；
+> 0.2.6 恢复成 `overflow:hidden` 版本后**实测无效**，0.2.7 才换成 `clip` 并补上兜底。
+> 改这块代码时注意：`fixedShellStyle` 会被拼进 JS 的单引号字符串，**不能有换行**。
 
 ## App 自更新
 
