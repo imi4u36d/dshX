@@ -67,7 +67,8 @@ TMPDIR="$ROOT/.tmp" xcrun swiftc -swift-version 5 -O \
   -target "${NODE_ARCH}-apple-macosx${DEPLOY_TARGET}" \
   -module-cache-path "$ROOT/.modulecache" \
   -framework AppKit -framework WebKit \
-  "$SHELL_DIR/Sources/main.swift" "$SHELL_DIR/Sources/updater.swift" \
+  "$SHELL_DIR/Sources/main.swift" "$SHELL_DIR/Sources/wheel-guard.swift" \
+  "$SHELL_DIR/Sources/updater.swift" \
   "$SHELL_DIR/Sources/runtime-updater.swift" \
   -o "$APP/Contents/MacOS/$APP_NAME"
 

@@ -103,6 +103,10 @@ private let menuFocusShimScript = """
 ///     框架容器上这条覆盖面最大，另外再用一段 scroll 捕获兜底（见下）。
 /// 只钉「整页级」容器，内部 overflow:auto 的滚动区（终端、代码块、消息列表）照旧能滚。
 ///
+/// 第 4 条（0.2.8 起）不在这段注入里：**左右滚轮把整页拖走** 是「精确滚动 + phase」
+/// 手势在文档/合成层上做的横向平移，注入的 CSS 挡不可靠，所以在 AppKit 层拦
+/// （`Sources/wheel-guard.swift` 的 ShellWebView：把这类事件的横向分量清零）。
+///
 /// 历史：这段守卫在 0.2.3 的 `8ad0668`（重写 main.swift 修模型切换）里被整段丢掉，
 /// 0.2.3 起又回到了「整页能滚」；0.2.6 恢复成 `hidden` 版本，实测对第 3 条无效，
 /// 0.2.7 才补上 `clip` 与兜底。
@@ -116,18 +120,45 @@ private let pageScrollAllowed = ProcessInfo.processInfo.environment["DSHX_ALLOW_
 /// `overflow:hidden` 先写、`overflow:clip` 后写：老引擎（Safari 15.4 以前）不认识 `clip`，
 /// 会丢掉后面那条、留下 `hidden`，至少不会比从前更差。
 /// 必须写成一整行：它会被拼进 JS 的单引号字符串里，换行会让整段脚本语法错误。
+///
+/// 第 3、4 条是「输入框被正文带着滚」的对症补丁（见下面 fixedShellGuardScript 的说明）：
+///   - `overscroll-behavior:contain`：会话滚动区滚到边界后不再把滚动链交给外层，
+///     也压掉这块区域的橡皮筋回弹——回弹会把 sticky 的输入框一起拖走。
+///   - `[data-phase]:not(hero/settling) [data-composer-seat]{position:sticky;bottom:0}`：
+///     上游只在 `.wSkVaW_root[data-phase=active]` 下给输入框座位加 sticky；这条用稳定
+///     属性名再钉一遍，万一上游类名改了、或 phase 属性没落到位，输入框也仍然贴在底部。
+///     hero（欢迎页输入框居中）与 settling（隐藏）两种情况不能钉，所以显式排除。
 private let fixedShellStyle = "html,body,#root{overflow:hidden !important;overflow:clip !important;"
     + "overscroll-behavior:none !important}"
     + "#root [class*=\"_frame\"]{overflow:hidden !important;overflow:clip !important}"
+    + "#root [data-conversation-scroll]{overscroll-behavior:contain !important}"
+    + "#root [data-composer-seat]{overscroll-behavior:contain !important}"
+    + "[data-phase]:not([data-phase=\"hero\"]):not([data-phase=\"settling\"]) [data-composer-seat]"
+    + "{position:sticky !important;bottom:0 !important}"
+    + "[data-content-phase]:not([data-content-phase=\"hero\"]):not([data-content-phase=\"settling\"])"
+    + " [data-composer-seat]{position:sticky !important;bottom:0 !important}"
 
 /// 用 documentStart 的 <style> 注入：React 挂载前规则就已生效，
 /// 注入点在 document.head 还没建好时退回 documentElement，再不行等 DOMContentLoaded 补一次。
 /// 页面重新导航（换会话、热更新）时脚本会重新注入，所以没必要监听 SPA 路由。
 ///
-/// 末尾那段 scroll 捕获是兜底：CSS 里那条 `[class*="_frame"]` 依赖上游的类名约定，
-/// 万一将来改了名，这里还能在容器被程序化滚走的那一刻把它钉回原点，并就地换成
-/// `overflow:clip`（只动真正被滚、且当前是 hidden 的那一个方向，避免误伤
-/// `overflow-x:hidden; overflow-y:auto` 这类正常滚动区）。
+/// 末尾那段 scroll 捕获是兜底，两条规则：
+///
+///   1. 「输入框跟着滚」的兜底（0.2.7 之后补的）。会话的滚动结构是
+///      `[data-conversation-scroll] > (消息列表 + 输入框座位)`，输入框靠
+///      `position:sticky` 贴在滚动视口底部。只要**任何别的祖先**也被滚走
+///      （程序化 `scrollIntoView`、上下文菜单、上游改版后的新容器……），
+///      sticky 的坐标系就跟着整块上移——表现就是「输入框离开底部，跟着消息一起滚」。
+///      所以这里定一条更省的规则：凡是「包含输入框座位、又不是会话自己的滚动区」
+///      的容器，一旦被滚，立刻归零。会话滚动区（以及它内部的消息、代码块等）之外
+///      一律不许滚，比按尺寸猜「整页级容器」更准，也不会误伤正文滚动。
+///   2. 整页级容器（`overflow:hidden` 的老兜底）：CSS 里那条 `[class*="_frame"]`
+///      依赖上游的类名约定，万一将来改了名，这里还能在容器被程序化滚走的那一刻
+///      把它钉回原点，并就地换成 `overflow:clip`（只动真正被滚、且当前是 hidden 的
+///      那一个方向，避免误伤 `overflow-x:hidden; overflow-y:auto` 这类正常滚动区）。
+///
+/// 命中「输入框被带走」时用 console.error 记一条（最多 5 条，壳会把页面 console.error
+/// 写进 backend.log）：真出现过一次，日志里就有那个容器的类名，定位不用再靠猜。
 private let fixedShellGuardScript = """
 (function () {
   var id = '__dshx_fixed_shell__';
@@ -145,9 +176,42 @@ private let fixedShellGuardScript = """
   document.addEventListener('DOMContentLoaded', inject);
   window.addEventListener('load', inject);
 
+  function describe(element) {
+    var name = element.tagName || '?';
+    if (element.id) { name += '#' + element.id; }
+    var cls = element.className;
+    if (typeof cls === 'string' && cls) { name += '.' + cls.slice(0, 40); }
+    return name;
+  }
+  var reported = 0;
+  function report(element, axis, value) {
+    if (reported >= 5) { return; }
+    reported += 1;
+    try {
+      console.error('[dshx] 输入框被「' + describe(element) + '」的' + axis
+        + '滚动带走 ' + Math.round(value) + 'px，已归零');
+    } catch (error) {}
+  }
+
   function pin(element) {
     if (!element || element.nodeType !== 1) { return; }
     if (element === document.documentElement || element === document.body) { return; }
+    if (element.closest && element.closest('[data-conversation-scroll]') !== null) { return; }
+    // 主会话与面板里的会话各有一份座位，这里是「有没有座位在我里面」，
+    // 不问是第几份；querySelector 只看后代，滚动区本身不会是座位。
+    if (element.querySelector && element.querySelector('[data-composer-seat]') !== null) {
+      if (element.scrollTop !== 0) {
+        var draggedTop = element.scrollTop;
+        element.scrollTop = 0;
+        report(element, '纵向', draggedTop);
+      }
+      if (element.scrollLeft !== 0) {
+        var draggedLeft = element.scrollLeft;
+        element.scrollLeft = 0;
+        report(element, '横向', draggedLeft);
+      }
+      return;
+    }
     var style = getComputedStyle(element);
     var rect = element.getBoundingClientRect();
     var wide = rect.width >= window.innerWidth * 0.8;
@@ -691,7 +755,9 @@ final class ShellController: NSObject, WKNavigationDelegate, NSApplicationDelega
                 forMainFrameOnly: true))
         }
 
-        let webView = WKWebView(frame: frame, configuration: configuration)
+        // ShellWebView 见 Sources/wheel-guard.swift：在 AppKit 层吃掉「手势型横向滚动」
+        // 的横向分量，挡掉注入 CSS 挡不住的整页横移。
+        let webView = ShellWebView(frame: frame, configuration: configuration)
         webView.navigationDelegate = self
         webView.allowsBackForwardNavigationGestures = false
         webView.allowsMagnification = pinchZoomEnabled

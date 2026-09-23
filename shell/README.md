@@ -72,6 +72,17 @@ INSTALL=1 bash shell/make-app.sh
   只钉整页级容器，内部 `overflow:auto` 的滚动区照旧能滚（已实测：`overflow:auto` 和
   `overflow-x:hidden; overflow-y:auto` 的大滚动区都不受影响）。
   调试开关：`DSHX_PINCH_ZOOM=1` 恢复双指缩放、`DSHX_ALLOW_PAGE_SCROLL=1` 完全不注入。
+- **左右滚轮不拖走整页**（`Sources/wheel-guard.swift`，AppKit 层）：带左右滚轮的鼠标发的
+  是「精确滚动 + phase」事件，WebKit 会拿它做**整页横向平移**（左侧会话列表一起走，
+  停在偏移位置），而 DOM 侧量不到任何 `scrollLeft`/`window.scrollX` 变化——CSS 的
+  `overflow:clip` 也不能可靠地挡住这条路。壳改用 `ShellWebView`：把这类事件的横向
+  分量清零后再交给 WebKit（点/定点/整数三个增量字段都清），WebKit 根本收不到横向增量。
+  纵向增量与 phase 原样保留，平滑滚动 / 惯性不受影响；非精确（普通滚轮）的横向滚动
+  照旧，正文里的代码块、表格还能左右滚。
+  调试开关：`DSHX_ALLOW_HORIZONTAL_SCROLL=1`（直接运行
+  `/Applications/dshX.app/Contents/MacOS/dshX` 时才带得上环境变量）关掉这条守卫复现原问题。
+  回归测试：`bash shell/tools/hscroll-test/run.sh`（裸 `WKWebView` 必须被滚走、
+  `ShellWebView` 必须纹丝不动，纵向照旧能滚）。
 - **弹层里的行点得动**：Safari 引擎在 `mousedown` 时会把焦点从当前元素上拿走，却不给
   被点的 `<button>`（Chromium 会给）；dsh 的弹层在 `onBlur` 里关自己，于是「菜单弹得
   出来、点模型没反应」。补丁在 `[role=menu]` / `[role=listbox]` 内的行上按下鼠标时
@@ -79,7 +90,8 @@ INSTALL=1 bash shell/make-app.sh
   调试开关：`DSHX_DISABLE_MENU_FOCUS_SHIM=1` 关掉补丁复现原问题。
 
 > 整页滚动这段补丁曾在 `8ad0668` 重写 `main.swift` 时被整段丢掉（0.2.3 起回归）；
-> 0.2.6 恢复成 `overflow:hidden` 版本后**实测无效**，0.2.7 才换成 `clip` 并补上兜底。
+> 0.2.6 恢复成 `overflow:hidden` 版本后**实测无效**，0.2.7 才换成 `clip` 并补上兜底；
+> 0.2.8 起再加一层与注入无关的 AppKit 硬拦（左右滚轮拖走整页）。
 > 改这块代码时注意：`fixedShellStyle` 会被拼进 JS 的单引号字符串，**不能有换行**。
 
 ## App 自更新
